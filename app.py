@@ -1,111 +1,96 @@
-# app.py
-
 import streamlit as st
 import pdfplumber
-import pytesseract
-from PIL import Image
-import json
-import os
-import tempfile
-from tabulate import tabulate
+import pandas as pd
 
-from transaction_patterns import parse_transactions  # <-- central import
+from maybank import parse_transactions_mbb, parse_transactions_mtasb
+from public_bank import parse_transactions_pbb
 
-st.title("📄 Bank Statement Parser (Modular Regex Version)")
-st.write("Upload your bank statement PDF and extract transactions. Regex patterns are modular for future banks.")
 
-# --- File Upload ---
-uploaded_file = st.file_uploader("Upload your bank statement PDF", type=["pdf"])
+# ---------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------
+
+st.set_page_config(page_title="Bank Statement Parser", layout="wide")
+
+st.title("📄 Bank Statement Parser")
+st.write("Upload a bank statement PDF and extract transactions using modular regex patterns.")
+
+
+# ---------------------
+# Bank Selection
+# ---------------------
+
+bank_choice = st.selectbox(
+    "Select Bank Format",
+    ["Auto-detect", "Maybank (MBB)", "MTASB", "Public Bank (PBB)"]
+)
+
+# Convert UI choice to parser hint
+bank_hint = None
+if bank_choice == "Maybank (MBB)":
+    bank_hint = "mbb"
+elif bank_choice == "MTASB":
+    bank_hint = "mtasb"
+elif bank_choice == "Public Bank (PBB)":
+    bank_hint = "pbb"
+
+
+uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+
+default_year = st.text_input("Default Year", "2025")
+
+
+def auto_detect_and_parse(text, page_num, default_year):
+    """Try all available bank parsers and return first match."""
+    # Try MTASB
+    t1 = parse_transactions_mtasb(text, page_num, default_year)
+    if t1:
+        return t1
+
+    # Try Maybank
+    t2 = parse_transactions_mbb(text, page_num)
+    if t2:
+        return t2
+
+    # Try Public Bank
+    t3 = parse_transactions_pbb(text, page_num, default_year)
+    if t3:
+        return t3
+
+    return []
+
 
 if uploaded_file:
+    with pdfplumber.open(uploaded_file) as pdf:
 
-    # Save uploaded PDF to a temp file
-    temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    temp_pdf.write(uploaded_file.read())
-    temp_pdf.close()
-
-    st.success("✅ PDF uploaded successfully.")
-
-    # Directory for OCR images
-    TEMP_DIR = "temp_ocr_images"
-    os.makedirs(TEMP_DIR, exist_ok=True)
-
-    # --- Text extraction (with OCR fallback) ---
-    def extract_text(page, page_num):
-        # Try native text extraction
-        text = page.extract_text()
-
-        # Fallback to OCR if needed
-        if not text or text.strip() == "":
-            img_path = os.path.join(TEMP_DIR, f"page_{page_num}.png")
-            page.to_image(resolution=300).save(img_path)
-            text = pytesseract.image_to_string(Image.open(img_path))
-
-        return text
-
-    # --------------------------
-    # Process entire PDF
-    # --------------------------
-    all_transactions = []
-
-    with pdfplumber.open(temp_pdf.name) as pdf:
-        total_pages = len(pdf.pages)
-        st.info(f"📄 Total pages detected: {total_pages}")
-
-        # You can let user pick default year (optional)
-        default_year = st.text_input("Default year for MTASB-style statements (e.g. 2025):", value="2025")
+        all_transactions = []
 
         for page_num, page in enumerate(pdf.pages, start=1):
-            st.write(f"Processing page {page_num}/{total_pages}...")
-            text = extract_text(page, page_num)
+            text = page.extract_text() or ""
 
-            page_transactions = parse_transactions(text, page_num, default_year=default_year)
-            all_transactions.extend(page_transactions)
+            # User selects a specific bank
+            if bank_hint == "mbb":
+                tx = parse_transactions_mbb(text, page_num)
+            elif bank_hint == "mtasb":
+                tx = parse_transactions_mtasb(text, page_num, default_year)
+            elif bank_hint == "pbb":
+                tx = parse_transactions_pbb(text, page_num, default_year)
+            else:
+                tx = auto_detect_and_parse(text, page_num, default_year)
 
-    st.success(f"✅ Extraction complete! Found {len(all_transactions)} transactions.")
+            all_transactions.extend(tx)
 
-    # --------------------------
-    # Display in Streamlit
-    # --------------------------
-    if all_transactions:
-        st.subheader("📊 Extracted Transactions")
-        st.dataframe(all_transactions)
-    else:
-        st.warning("No transactions detected. You may need to adjust regex patterns in transaction_patterns.py.")
+        # Display results
+        df = pd.DataFrame(all_transactions)
 
-    # --------------------------
-    # Download JSON
-    # --------------------------
-    json_output = json.dumps(all_transactions, indent=4)
+        st.subheader("Extracted Transactions")
+        st.dataframe(df, use_container_width=True)
 
-    st.download_button(
-        "⬇️ Download JSON file",
-        json_output,
-        "transactions.json",
-        "application/json"
-    )
-
-    # --------------------------
-    # Download TXT table
-    # --------------------------
-    if all_transactions:
-        rows = []
-        for t in all_transactions:
-            rows.append([
-                t["date"],
-                t["description"],
-                f"{t['debit']:.2f}",
-                f"{t['credit']:.2f}",
-                f"{t['balance']:.2f}",
-                t["page"]
-            ])
-
-        headers = ["Date", "Description", "Debit", "Credit", "Balance", "Page"]
-        table_text = tabulate(rows, headers=headers, tablefmt="grid")
-
+        # Download CSV
+        csv = df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "⬇️ Download Table (.txt)",
-            table_text,
-            "transactions_table.txt",
-            "text/plain"
+            "Download CSV",
+            data=csv,
+            file_name="transactions.csv",
+            mime="text/csv"
         )
