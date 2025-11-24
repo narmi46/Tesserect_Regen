@@ -28,7 +28,7 @@ bank_hint = None
 if bank_choice == "Maybank":
     bank_hint = "maybank"
 elif bank_choice == "Public Bank (PBB)":
-    bank_hint = "pbb":
+    bank_hint = "pbb"
 elif bank_choice == "RHB Bank":
     bank_hint = "rhb"
 
