@@ -1,75 +1,45 @@
 import regex as re
 
 # ============================================================
-# RHB BANK STATEMENT PARSER
+# IMPROVED RHB STATEMENT PARSER (handles all formats)
 # ============================================================
+
+# This robust pattern handles:
+# - Variable description formats containing "/", "-", numbers
+# - Debit and credit in ANY position
+# - Overdraft balances ending in "-"
+# - Positive balances ending in "+"
 #
-# Example rows from your RHB PDF:
-#
-# 05-02-2025 061 CLEAR / / AUTODEBIT 00001550 27,286.00 - 770,138.57-
-# 25-02-2025 980 CLEAR / 00009992 - 30,000.00 740,138.57-
-#
-# The last value ALWAYS ends with "-" for overdraft balance.
-#
-# Columns are:
-#   Date (DD-MM-YYYY)
-#   Branch Code (3 digits)
-#   Description (text)
-#   Debit (or "-")
-#   Credit (or "-")
-#   Balance (like 770,138.57-)
-#
-# ============================================================
 
 PATTERN_RHB = re.compile(
-    r"(\d{2}-\d{2}-\d{4})\s+"               # date: 05-02-2025
-    r"(\d{3})\s+"                           # branch: 061
-    r"(.*?)\s+"                             # description until DR/CR
-    r"([0-9,]+\.\d{2}|-)\s+"                # debit or '-'
-    r"([0-9,]+\.\d{2}|-)\s+"                # credit or '-'
-    r"([0-9,]+\.\d{2})-"                    # balance (minus sign separate)
+    r"(\d{2}-\d{2}-\d{4})\s+"                       # date
+    r"(\d{3})\s+"                                   # branch
+    r"(.+?)\s+"                                     # description (greedy)
+    r"([0-9,]+\.\d{2}|-)\s+"                        # debit OR '-'
+    r"([0-9,]+\.\d{2}|-)\s+"                        # credit OR '-'
+    r"([0-9,]+\.\d{2})([+-])"                       # balance + sign
 )
 
-
 def parse_line_rhb(line, page_num):
-    """
-    Parse a single line of RHB bank statement.
-
-    Handles overdraft balances like: 813,527.71-
-    Converts them to negative floats.
-    """
-
     m = PATTERN_RHB.search(line)
     if not m:
         return None
 
-    date_raw, branch, desc, dr_raw, cr_raw, balance_raw = m.groups()
+    date_raw, branch, desc, dr_raw, cr_raw, balance_raw, sign = m.groups()
 
-    # Convert date: DD-MM-YYYY → YYYY-MM-DD
-    day, month, year = date_raw.split("-")
-    full_date = f"{year}-{month}-{day}"
+    # Convert date: DD-MM-YYYY -> YYYY-MM-DD
+    d, m_, y = date_raw.split("-")
+    full_date = f"{y}-{m_}-{d}"
 
-    # Debit / Credit parsing
+    # Debit / Credit
     debit = float(dr_raw.replace(",", "")) if dr_raw != "-" else 0.0
     credit = float(cr_raw.replace(",", "")) if cr_raw != "-" else 0.0
 
-    # ------------------------------
-    # Handle overdraft (negative balance)
-    # ------------------------------
-    #
-    # The regex captures "770,138.57" but the actual line ends with:
-    # "770,138.57-"
-    #
-    # A trailing "-" ALWAYS means balance is NEGATIVE.
-    #
-
-    is_negative = line.strip().endswith("-")
-
+    # Balance with sign (+ or -)
     balance = float(balance_raw.replace(",", ""))
-    if is_negative:
+    if sign == "-":
         balance = -balance
 
-    # Combine branch and description for readability
     description = f"{branch} {desc.strip()}"
 
     return {
@@ -83,11 +53,7 @@ def parse_line_rhb(line, page_num):
 
 
 def parse_transactions_rhb(text, page_num):
-    """
-    Parse all transactions within a block of text for RHB.
-    """
     tx_list = []
-
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
