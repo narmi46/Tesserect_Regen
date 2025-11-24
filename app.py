@@ -1,6 +1,7 @@
 import streamlit as st
 import pdfplumber
 import json
+import pandas as pd
 
 from maybank import parse_transactions_maybank
 from public_bank import parse_transactions_pbb
@@ -9,8 +10,12 @@ from public_bank import parse_transactions_pbb
 st.set_page_config(page_title="Bank Statement Parser", layout="wide")
 
 st.title("📄 Bank Statement Parser")
-st.write("Upload a bank statement PDF and extract transactions.")
+st.write("Upload a bank statement PDF to extract transactions in a clean readable table.")
 
+
+# --------------------------
+# Bank Choice
+# --------------------------
 
 bank_choice = st.selectbox(
     "Select Bank Format",
@@ -28,6 +33,10 @@ uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
 default_year = st.text_input("Default Year", "2025")
 
 
+# --------------------------
+# Auto-detect logic
+# --------------------------
+
 def auto_detect_and_parse(text, page_num, default_year):
     t1 = parse_transactions_maybank(text, page_num, default_year)
     if t1:
@@ -39,6 +48,10 @@ def auto_detect_and_parse(text, page_num, default_year):
 
     return []
 
+
+# --------------------------
+# Main PDF Processing
+# --------------------------
 
 if uploaded_file:
     with pdfplumber.open(uploaded_file) as pdf:
@@ -57,9 +70,24 @@ if uploaded_file:
 
             all_tx.extend(tx)
 
-        st.subheader("Extracted Transactions")
-        st.json(all_tx)
+        # --------------------------
+        # Display Table (Human Readable)
+        # --------------------------
+        st.subheader("Extracted Transactions (Readable Table)")
 
+        if all_tx:
+            df = pd.DataFrame(all_tx)
+
+            # Reorder columns nicely
+            df = df[["date", "description", "debit", "credit", "balance", "page"]]
+
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.warning("No transactions matched the selected bank format.")
+
+        # --------------------------
+        # JSON DOWNLOAD
+        # --------------------------
         json_data = json.dumps(all_tx, indent=4)
         st.download_button(
             "Download JSON",
@@ -68,6 +96,9 @@ if uploaded_file:
             mime="application/json"
         )
 
+        # --------------------------
+        # TXT DOWNLOAD
+        # --------------------------
         txt_data = "\n".join(
             f"{t['date']} | {t['description']} | DR:{t['debit']} | CR:{t['credit']} | BAL:{t['balance']}"
             for t in all_tx
