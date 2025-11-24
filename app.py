@@ -107,7 +107,25 @@ if start_processing and uploaded_files:
                     st.text(text)
 
             # RESET BACK TO FIRST PAGE FOR PROCESSING
-            pdf.seek(0)
+            # Re-open PDF for actual processing (needed because we iterated once for preview)
+with pdfplumber.open(uploaded_file) as pdf_process:
+    for page_num, page in enumerate(pdf_process.pages, start=1):
+        text = page.extract_text() or ""
+
+        if bank_hint == "maybank":
+            tx = parse_transactions_maybank(text, page_num, default_year)
+        elif bank_hint == "pbb":
+            tx = parse_transactions_pbb(text, page_num, default_year)
+        elif bank_hint == "rhb":
+            tx = parse_transactions_rhb(text, page_num)
+        else:
+            tx = auto_detect_and_parse(text, page_num, default_year)
+
+        for t in tx:
+            t["source_file"] = uploaded_file.name
+
+        all_tx.extend(tx)
+
 
             # PROCESS TRANSACTIONS
             for page_num, page in enumerate(pdf.pages, start=1):
