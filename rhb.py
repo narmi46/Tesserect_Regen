@@ -1,206 +1,66 @@
-import streamlit as st
-import pdfplumber
-import json
-import pandas as pd
+import regex as re
 
-from maybank import parse_transactions_maybank
-from public_bank import parse_transactions_pbb
-from rhb import parse_transactions_rhb
+# ============================================================
+# IMPROVED RHB STATEMENT PARSER (handles all formats)
+# ============================================================
 
+# This robust pattern handles:
+# - Variable description formats containing "/", "-", numbers
+# - Debit and credit in ANY position
+# - Overdraft balances ending in "-"
+# - Positive balances ending in "+"
+#
 
-# ---------------------------------------------------
-# Streamlit Setup
-# ---------------------------------------------------
-
-st.set_page_config(page_title="Bank Statement Parser", layout="wide")
-
-st.title("📄 Bank Statement Parser (Multi-File Support)")
-
-
-# ---------------------------------------------------
-# Clear All Button
-# ---------------------------------------------------
-
-if st.button("🧹 Clear All Uploaded PDFs"):
-    st.session_state.clear()
-    st.experimental_rerun()
-
-
-# ---------------------------------------------------
-# Bank Selection
-# ---------------------------------------------------
-
-bank_choice = st.selectbox(
-    "Select Bank Format",
-    ["Auto-detect", "Maybank", "Public Bank (PBB)", "RHB Bank"]
+PATTERN_RHB = re.compile(
+    r"(\d{2}-\d{2}-\d{4})\s+"                       # date
+    r"(\d{3})\s+"                                   # branch
+    r"(.+?)\s+"                                     # description (greedy)
+    r"([0-9,]+\.\d{2}|-)\s+"                        # debit OR '-'
+    r"([0-9,]+\.\d{2}|-)\s+"                        # credit OR '-'
+    r"([0-9,]+\.\d{2})([+-])"                       # balance + sign
 )
 
-bank_hint = None
-if bank_choice == "Maybank":
-    bank_hint = "maybank"
-elif bank_choice == "Public Bank (PBB)":
-    bank_hint = "pbb"
-elif bank_choice == "RHB Bank":
-    bank_hint = "rhb"
+def parse_line_rhb(line, page_num):
+    m = PATTERN_RHB.search(line)
+    if not m:
+        return None
+
+    date_raw, branch, desc, dr_raw, cr_raw, balance_raw, sign = m.groups()
+
+    # Convert date: DD-MM-YYYY -> YYYY-MM-DD
+    d, m_, y = date_raw.split("-")
+    full_date = f"{y}-{m_}-{d}"
+
+    # Debit / Credit
+    debit = float(dr_raw.replace(",", "")) if dr_raw != "-" else 0.0
+    credit = float(cr_raw.replace(",", "")) if cr_raw != "-" else 0.0
+
+    # Balance with sign (+ or -)
+    balance = float(balance_raw.replace(",", ""))
+    if sign == "-":
+        balance = -balance
+
+    description = f"{branch} {desc.strip()}"
+
+    return {
+        "date": full_date,
+        "description": description,
+        "debit": debit,
+        "credit": credit,
+        "balance": balance,
+        "page": page_num,
+    }
 
 
-# ---------------------------------------------------
-# Multiple File Upload
-# ---------------------------------------------------
+def parse_transactions_rhb(text, page_num):
+    tx_list = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
 
-uploaded_files = st.file_uploader(
-    "Upload PDF Files",
-    type=["pdf"],
-    accept_multiple_files=True,
-    key="uploaded_files"
-)
+        tx = parse_line_rhb(line, page_num)
+        if tx:
+            tx_list.append(tx)
 
-default_year = st.text_input("Default Year", "2025")
-
-
-# ---------------------------------------------------
-# Start Button
-# ---------------------------------------------------
-
-start_processing = st.button("🚀 START PROCESSING")
-
-
-# ---------------------------------------------------
-# Auto Detect Parser
-# ---------------------------------------------------
-
-def auto_detect_and_parse(text, page_num, default_year="2025"):
-    # Try Maybank
-    tx = parse_transactions_maybank(text, page_num, default_year)
-    if tx:
-        return tx
-
-    # Try Public Bank
-    tx = parse_transactions_pbb(text, page_num, default_year)
-    if tx:
-        return tx
-
-    # Try RHB
-    tx = parse_transactions_rhb(text, page_num)
-    if tx:
-        return tx
-
-    return []
-
-
-# ---------------------------------------------------
-# Main Multi-File Processing
-# ---------------------------------------------------
-
-all_tx = []
-
-if start_processing and uploaded_files:
-
-    for uploaded_file in uploaded_files:
-
-        st.write(f"Processing: **{uploaded_file.name}**")
-
-        with pdfplumber.open(uploaded_file) as pdf:
-
-            for page_num, page in enumerate(pdf.pages, start=1):
-                text = page.extract_text() or ""
-
-                # Parse by selected bank or auto-detect
-                if bank_hint == "maybank":
-                    tx = parse_transactions_maybank(text, page_num, default_year)
-
-                elif bank_hint == "pbb":
-                    tx = parse_transactions_pbb(text, page_num, default_year)
-
-                elif bank_hint == "rhb":
-                    tx = parse_transactions_rhb(text, page_num)
-
-                else:
-                    tx = auto_detect_and_parse(text, page_num, default_year)
-
-                # Add source filename
-                for t in tx:
-                    t["source_file"] = uploaded_file.name
-
-                all_tx.extend(tx)
-
-
-# ---------------------------------------------------
-# Display Extracted Transactions
-# ---------------------------------------------------
-
-if all_tx:
-
-    st.subheader("📊 Extracted Transactions (Readable Table)")
-
-    df = pd.DataFrame(all_tx)
-
-    # Arrange columns nicely
-    column_order = ["date", "description", "debit", "credit", "balance", "page", "source_file"]
-    df = df[[c for c in column_order if c in df.columns]]
-
-    st.dataframe(df, use_container_width=True)
-
-
-    # ---------------------------------------------------
-    # JSON DOWNLOAD
-    # ---------------------------------------------------
-
-    json_data = json.dumps(all_tx, indent=4)
-
-    st.download_button(
-        "⬇️ Download JSON",
-        json_data,
-        file_name="transactions.json",
-        mime="application/json"
-    )
-
-
-    # ---------------------------------------------------
-    # TXT (Pretty Table) DOWNLOAD
-    # ---------------------------------------------------
-
-    df_txt = df[["date", "description", "debit", "credit", "balance", "source_file"]]
-
-    w_date = 12
-    w_desc = 45
-    w_debit = 12
-    w_credit = 12
-    w_balance = 14
-    w_file = 20
-
-    header = (
-        f"{'DATE':<{w_date}} | "
-        f"{'DESCRIPTION':<{w_desc}} | "
-        f"{'DEBIT':>{w_debit}} | "
-        f"{'CREDIT':>{w_credit}} | "
-        f"{'BALANCE':>{w_balance}} | "
-        f"{'FILE':<{w_file}}"
-    )
-    separator = "-" * len(header)
-
-    lines = [header, separator]
-
-    for _, row in df_txt.iterrows():
-        line = (
-            f"{row['date']:<{w_date}} | "
-            f"{str(row['description'])[:w_desc]:<{w_desc}} | "
-            f"{row['debit']:>{w_debit}.2f} | "
-            f"{row['credit']:>{w_credit}.2f} | "
-            f"{row['balance']:>{w_balance}.2f} | "
-            f"{row['source_file']:<{w_file}}"
-        )
-        lines.append(line)
-
-    txt_data = "\n".join(lines)
-
-    st.download_button(
-        "⬇️ Download TXT",
-        txt_data,
-        file_name="transactions.txt",
-        mime="text/plain"
-    )
-
-
-else:
-    st.info("Upload PDF files and click **START PROCESSING** to begin.")
+    return tx_list
