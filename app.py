@@ -96,17 +96,50 @@ if uploaded_file:
             mime="application/json"
         )
 
+               # --------------------------
+        # TXT DOWNLOAD (Beautiful Table)
         # --------------------------
-        # TXT DOWNLOAD
-        # --------------------------
-        txt_data = "\n".join(
-            f"{t['date']} | {t['description']} | DR:{t['debit']} | CR:{t['credit']} | BAL:{t['balance']}"
-            for t in all_tx
-        )
 
-        st.download_button(
-            "Download TXT",
-            txt_data,
-            file_name="transactions.txt",
-            mime="text/plain"
-        )
+        if all_tx:
+            df = pd.DataFrame(all_tx)
+            df = df[["date", "description", "debit", "credit", "balance"]]
+
+            # column widths
+            w_date = 12
+            w_desc = 45
+            w_debit = 12
+            w_credit = 12
+            w_balance = 14
+
+            # header
+            header = (
+                f"{'DATE':<{w_date}} | "
+                f"{'DESCRIPTION':<{w_desc}} | "
+                f"{'DEBIT':>{w_debit}} | "
+                f"{'CREDIT':>{w_credit}} | "
+                f"{'BALANCE':>{w_balance}}"
+            )
+
+            separator = "-" * len(header)
+
+            # rows
+            lines = [header, separator]
+
+            for _, row in df.iterrows():
+                line = (
+                    f"{str(row['date']):<{w_date}} | "
+                    f"{str(row['description'])[:w_desc]:<{w_desc}} | "
+                    f"{row['debit']:>{w_debit}.2f} | "
+                    f"{row['credit']:>{w_credit}.2f} | "
+                    f"{row['balance']:>{w_balance}.2f}"
+                )
+                lines.append(line)
+
+            txt_data = "\n".join(lines)
+
+            st.download_button(
+                "Download TXT",
+                txt_data,
+                file_name="transactions.txt",
+                mime="text/plain"
+            )
