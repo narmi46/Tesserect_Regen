@@ -5,6 +5,8 @@ import pandas as pd
 
 from maybank import parse_transactions_maybank
 from public_bank import parse_transactions_pbb
+from rhb import parse_transactions_rhb
+
 
 
 st.set_page_config(page_title="Bank Statement Parser", layout="wide")
@@ -19,14 +21,17 @@ st.write("Upload a bank statement PDF to extract transactions in a clean readabl
 
 bank_choice = st.selectbox(
     "Select Bank Format",
-    ["Auto-detect", "Maybank", "Public Bank (PBB)"]
+    ["Auto-detect", "Maybank", "Public Bank (PBB)", "RHB Bank"]
 )
 
 bank_hint = None
 if bank_choice == "Maybank":
     bank_hint = "maybank"
 elif bank_choice == "Public Bank (PBB)":
-    bank_hint = "pbb"
+    bank_hint = "pbb":
+elif bank_choice == "RHB Bank":
+    bank_hint = "rhb"
+
 
 
 uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
@@ -45,6 +50,11 @@ def auto_detect_and_parse(text, page_num, default_year):
     t2 = parse_transactions_pbb(text, page_num, default_year)
     if t2:
         return t2
+        
+    t3 = parse_transactions_rhb(text, page_num)
+    if t3:
+        return t3
+
 
     return []
 
@@ -67,6 +77,9 @@ if uploaded_file:
                 tx = parse_transactions_pbb(text, page_num, default_year)
             else:
                 tx = auto_detect_and_parse(text, page_num, default_year)
+            elif bank_hint == "rhb":
+                tx = parse_transactions_rhb(text, page_num)
+
 
             all_tx.extend(tx)
 
