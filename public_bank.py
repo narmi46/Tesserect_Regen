@@ -1,16 +1,16 @@
 import regex as re
 
 # ---------------------------------------------------------
-# PATTERN 1 — Line WITH date:
+# PATTERN 1 — Line WITH date AND amount:
 # Example:
-#   02/05 DEP-ECP 125453        1,411.99    2,780.16
+#   02/01 DEP-ECP 130045      609.99    2,889.09
 # ---------------------------------------------------------
 PATTERN_WITH_DATE = re.compile(
     r"""
-    ^(?P<date>\d{2}/\d{2})\s+                         # 02/05
-    (?P<desc>.+?)\s+                                  # description
-    (?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+          # 1,411.99
-    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$           # 2,780.16
+    ^(?P<date>\d{2}/\d{2})\s+                       # 02/01
+    (?P<desc>.+?)\s+                                # DEP-ECP 130045
+    (?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+        # 609.99
+    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$         # 2,889.09
     """,
     re.VERBOSE
 )
@@ -18,44 +18,59 @@ PATTERN_WITH_DATE = re.compile(
 # ---------------------------------------------------------
 # PATTERN 2 — Line WITHOUT date:
 # Example:
-#   DEP-ECP 222798        20.09      2,800.25
+#   DEP-ECP 222799     39.80     2,840.05
 # ---------------------------------------------------------
 PATTERN_NO_DATE = re.compile(
     r"""
-    ^(?P<desc>.+?)\s+                                 # description only
-    (?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+          # 20.09
-    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$           # 2,800.25
+    ^(?P<desc>.+?)\s+
+    (?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+
+    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$
     """,
     re.VERBOSE
 )
 
 # ---------------------------------------------------------
+# PATTERN 3 — SPECIAL CASE:
+# Line has DATE but **NO amount column** (Balance B/F, C/F, From Last Statement)
+# Example:
+#   31/01 Balance B/F 23154.70
+#   02/01 Balance From Last Statement 2279.10
+# ---------------------------------------------------------
+PATTERN_BALANCE_DATE_ONLY = re.compile(
+    r"""
+    ^(?P<date>\d{2}/\d{2})\s+                 # 31/01
+    (?P<desc>Balance.*|BALANCE.*)\s+          # Balance B/F, Balance C/F
+    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$   # 23154.70
+    """,
+    re.VERBOSE | re.IGNORECASE
+)
+
+# ---------------------------------------------------------
 # CLASSIFY CREDIT / DEBIT
 # ---------------------------------------------------------
-def _classify_debit_credit(desc: str, amount: float) -> tuple[float, float]:
+def _classify_debit_credit(desc: str, amount: float):
     """
-    Decide whether the amount is a debit or credit.
-    Returns (debit, credit).
+    Determine whether the amount is debit or credit.
     """
     d = desc.upper()
 
-    # MONEY IN (CREDITS)
+    # MONEY IN (CREDIT)
     credit_keywords = [
-        "DEP-ECP",             # Deposits
-        "DUITNOW TRSF CR",     # DuitNow incoming
-        "TSFR FUND CR",        # Transfer in
-        "HSE CHEQ RTN",        # House cheque returned
+        "DEP-ECP",
+        "DUITNOW TRSF CR",
+        "TSFR FUND CR",
+        "HSE CHEQ RTN",
     ]
 
-    # MONEY OUT (DEBITS)
+    # MONEY OUT (DEBIT)
     debit_keywords = [
         "DUITNOW TRSF DR",
         "DR-ECP",
-        "HANDLING CHRG",       # Fixed here — this is DEBIT
+        "HANDLING CHRG",
         "CHEQ ",
         "CHQ ",
         "GST DR",
-        " DR ",                # generic DR
+        " DR ",
     ]
 
     is_credit = any(k in d for k in credit_keywords)
@@ -67,35 +82,28 @@ def _classify_debit_credit(desc: str, amount: float) -> tuple[float, float]:
     if is_debit and not is_credit:
         return amount, 0.0
 
-    # Default fallback: deposit-heavy account → assume credit if uncertain
+    # Default: Public Bank Current Account typically inflow heavy
     return 0.0, amount
 
 
 # ---------------------------------------------------------
-# BUILD TRANSACTION OBJECT
+# BUILD TX DICTIONARY
 # ---------------------------------------------------------
-def _build_tx(date_str: str,
-              desc: str,
-              amount_raw: str,
-              balance_raw: str,
-              page_num: int,
-              default_year: str = "2025") -> dict | None:
-
+def _build_tx(date_str, desc, amount_raw, balance_raw, page_num, default_year="2025"):
     desc = desc.strip()
 
-    # Skip balance rows if they ever match
-    if desc.upper().startswith("BALANCE "):
+    # Exclude unwanted non-transaction lines
+    if desc.upper().startswith("BALANCE"):
         return None
 
-    # Convert date: dd/mm → yyyy-mm-dd
-    day, month = date_str.split("/")
-    full_date = f"{default_year}-{month}-{day}"
+    # Date "dd/mm" → "yyyy-mm-dd"
+    dd, mm = date_str.split("/")
+    full_date = f"{default_year}-{mm}-{dd}"
 
-    # Convert numeric fields
+    # Convert numbers
     amount = float(amount_raw.replace(",", ""))
     balance = float(balance_raw.replace(",", ""))
 
-    # Classify debit/credit
     debit, credit = _classify_debit_credit(desc, amount)
 
     return {
@@ -111,14 +119,7 @@ def _build_tx(date_str: str,
 # ---------------------------------------------------------
 # MAIN PARSER
 # ---------------------------------------------------------
-def parse_transactions_pbb(text: str, page_num: int, default_year: str = "2025"):
-    """
-    Parse all PBB transactions on a single PDF page.
-    Handles:
-      ✓ Lines with date
-      ✓ Lines without date (use last seen date)
-      ✓ Correct debit/credit classification
-    """
+def parse_transactions_pbb(text: str, page_num: int, default_year="2025"):
     tx_list = []
     current_date = None
 
@@ -127,38 +128,55 @@ def parse_transactions_pbb(text: str, page_num: int, default_year: str = "2025")
         if not line:
             continue
 
-        # --------------------------
-        # Match line WITH date
-        # --------------------------
-        m = PATTERN_WITH_DATE.match(line)
-        if m:
-            current_date = m.group("date")
-            desc = m.group("desc")
-            amount_raw = m.group("amount")
-            balance_raw = m.group("balance")
+        # -------------------------------------------------
+        # SPECIAL FIX: DATE + Balance B/F but **NO debit/credit**
+        # Example:
+        #   "31/01 Balance B/F 23154.70"
+        # This DOES NOT create a transaction,
+        # but MUST SET the date so next rows inherit it.
+        # -------------------------------------------------
+        m_bal = PATTERN_BALANCE_DATE_ONLY.match(line)
+        if m_bal:
+            current_date = m_bal.group("date")   # anchor the date
+            continue                              # do NOT create a transaction
 
-            tx = _build_tx(current_date, desc, amount_raw, balance_raw,
-                           page_num, default_year)
+        # -------------------------------------------------
+        # Case 1 — WITH DATE + AMOUNT
+        # -------------------------------------------------
+        m1 = PATTERN_WITH_DATE.match(line)
+        if m1:
+            current_date = m1.group("date")
+            tx = _build_tx(
+                m1.group("date"),
+                m1.group("desc"),
+                m1.group("amount"),
+                m1.group("balance"),
+                page_num,
+                default_year
+            )
             if tx:
                 tx_list.append(tx)
             continue
 
-        # No date to attach a no-date row → skip
+        # If no date yet, cannot parse rows without date
         if current_date is None:
             continue
 
-        # --------------------------
-        # Match line WITHOUT date
-        # --------------------------
+        # -------------------------------------------------
+        # Case 2 — NO DATE (continuation rows)
+        # -------------------------------------------------
         m2 = PATTERN_NO_DATE.match(line)
         if m2:
-            desc = m2.group("desc")
-            amount_raw = m2.group("amount")
-            balance_raw = m2.group("balance")
-
-            tx = _build_tx(current_date, desc, amount_raw, balance_raw,
-                           page_num, default_year)
+            tx = _build_tx(
+                current_date,
+                m2.group("desc"),
+                m2.group("amount"),
+                m2.group("balance"),
+                page_num,
+                default_year
+            )
             if tx:
                 tx_list.append(tx)
+            continue
 
     return tx_list
