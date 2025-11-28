@@ -1,131 +1,111 @@
 import regex as re
 
-# =========================================================
-# PATTERNS
-# =========================================================
-
-# Row WITH DATE + DEBIT + CREDIT + BALANCE
+# Pattern with date + description + amount + balance
 PATTERN_WITH_DATE = re.compile(
     r"""
-    ^(?P<date>\d{2}/\d{2})\s+                      # 02/04
-    (?P<desc>.+?)\s+                               # Description
-    (?P<debit>-?\d{1,3}(?:,\d{3})*\.\d{2}|-?)\s+   # Debit column
-    (?P<credit>-?\d{1,3}(?:,\d{3})*\.\d{2}|-?)\s+  # Credit column
-    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$        # Balance
-    """,
-    re.VERBOSE
+    ^(?P<date>\d{2}/\d{2})\s+
+    (?P<desc>.+?)\s+
+    (?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+
+    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$
+    """, re.VERBOSE
 )
 
-# Row WITHOUT DATE (inherits previous date)
+# Pattern no-date (continuation)
 PATTERN_NO_DATE = re.compile(
     r"""
     ^(?P<desc>.+?)\s+
-    (?P<debit>-?\d{1,3}(?:,\d{3})*\.\d{2}|-?)\s+
-    (?P<credit>-?\d{1,3}(?:,\d{3})*\.\d{2}|-?)\s+
+    (?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+
     (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$
-    """,
-    re.VERBOSE
+    """, re.VERBOSE
 )
 
-# Balance-only rows (Balance B/F or C/F)
-PATTERN_BALANCE_DATE_ONLY = re.compile(
+# Balance B/F and C/F (date + balance only)
+PATTERN_BAL_ONLY = re.compile(
     r"""
     ^(?P<date>\d{2}/\d{2})\s+
     (?P<desc>Balance.*)\s+
     (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$
-    """,
-    re.VERBOSE | re.IGNORECASE
+    """, re.VERBOSE | re.IGNORECASE
 )
 
-# =========================================================
-# BUILD TRANSACTION OBJECT
-# =========================================================
-def _build_tx(date_str, desc, debit_raw, credit_raw, balance_raw, page_num, default_year="2025"):
-
-    # Skip balance forward/carry lines
-    if desc.upper().startswith("BALANCE"):
-        return None
-
-    # Convert dd/mm → yyyy-mm-dd
-    dd, mm = date_str.split("/")
-    iso_date = f"{default_year}-{mm}-{dd}"
-
-    # Normalize numeric fields
-    def norm(x):
-        return float(x.replace(",", "")) if x.strip() not in ("", "-") else 0.0
-
-    debit = norm(debit_raw)
-    credit = norm(credit_raw)
-    balance = norm(balance_raw)
-
-    return {
-        "date": iso_date,
-        "description": desc.strip(),
-        "debit": debit,
-        "credit": credit,
-        "balance": balance,
-        "page": page_num,
-    }
-
-# =========================================================
-# MAIN PARSER
-# =========================================================
 def parse_transactions_pbb(text: str, page_num: int, default_year="2025"):
     tx_list = []
     current_date = None
+    prev_balance = None
 
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
+    for raw in text.splitlines():
+        line = raw.strip()
         if not line:
             continue
 
-        # -------------------------------
-        # Case A — Balance B/F or C/F
-        # -------------------------------
-        m_bal = PATTERN_BALANCE_DATE_ONLY.match(line)
+        # Balance only rows
+        m_bal = PATTERN_BAL_ONLY.match(line)
         if m_bal:
-            current_date = m_bal.group("date")   # anchor date
+            current_date = m_bal.group("date")
+            prev_balance = float(m_bal.group("balance").replace(",", ""))
             continue
 
-        # -------------------------------
-        # Case B — WITH DATE
-        # -------------------------------
+        # With date row
         m1 = PATTERN_WITH_DATE.match(line)
         if m1:
             current_date = m1.group("date")
-            tx = _build_tx(
-                m1.group("date"),
-                m1.group("desc"),
-                m1.group("debit"),
-                m1.group("credit"),
-                m1.group("balance"),
-                page_num,
-                default_year,
-            )
-            if tx:
-                tx_list.append(tx)
+            desc = m1.group("desc").strip()
+            amount = float(m1.group("amount").replace(",", ""))
+            balance = float(m1.group("balance").replace(",", ""))
+
+            # Determine debit/credit via balance difference
+            if prev_balance is not None:
+                if balance < prev_balance:
+                    debit, credit = amount, 0.0
+                else:
+                    debit, credit = 0.0, amount
+            else:
+                debit, credit = 0.0, amount   # fallback
+
+            prev_balance = balance
+
+            dd, mm = current_date.split("/")
+            iso = f"{default_year}-{mm}-{dd}"
+
+            tx_list.append({
+                "date": iso,
+                "description": desc,
+                "debit": debit,
+                "credit": credit,
+                "balance": balance,
+                "page": page_num
+            })
             continue
 
-        # Cannot parse no-date rows without a date
-        if current_date is None:
-            continue
+        # No date row
+        if current_date:
+            m2 = PATTERN_NO_DATE.match(line)
+            if m2:
+                desc = m2.group("desc").strip()
+                amount = float(m2.group("amount").replace(",", ""))
+                balance = float(m2.group("balance").replace(",", ""))
 
-        # -------------------------------
-        # Case C — NO DATE rows
-        # -------------------------------
-        m2 = PATTERN_NO_DATE.match(line)
-        if m2:
-            tx = _build_tx(
-                current_date,
-                m2.group("desc"),
-                m2.group("debit"),
-                m2.group("credit"),
-                m2.group("balance"),
-                page_num,
-                default_year,
-            )
-            if tx:
-                tx_list.append(tx)
-            continue
+                # Determine debit/credit
+                if prev_balance is not None:
+                    if balance < prev_balance:
+                        debit, credit = amount, 0.0
+                    else:
+                        debit, credit = 0.0, amount
+                else:
+                    debit, credit = 0.0, amount
+
+                prev_balance = balance
+
+                dd, mm = current_date.split("/")
+                iso = f"{default_year}-{mm}-{dd}"
+
+                tx_list.append({
+                    "date": iso,
+                    "description": desc,
+                    "debit": debit,
+                    "credit": credit,
+                    "balance": balance,
+                    "page": page_num
+                })
 
     return tx_list
