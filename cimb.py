@@ -1,94 +1,69 @@
 import regex as re
 
-# =========================================================
-# CIMB PATTERNS
-# =========================================================
+# DATE line: "30/05/2024 SOMETHING"
+PATTERN_DATE = re.compile(r"^(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<desc>.+)$")
 
-# 1. FULL ROW (Date + Description + Ref + Withdrawal/Deposit + Balance)
-PATTERN_CIMB_FULL = re.compile(
-    r"""
-    ^(?P<date>\d{2}/\d{2}/\d{4})\s+
-    (?P<desc>.+?)\s+
-    (?P<ref>[A-Z0-9]+)\s+
-    (?P<withdraw>\d{1,3}(?:,\d{3})*\.\d{2}|-)\s+
-    (?P<deposit>\d{1,3}(?:,\d{3})*\.\d{2}|-)\s+
-    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$
-    """,
-    re.VERBOSE
+# FINAL NUMERIC LINE: "993830651126 380.00 212,954.99"
+PATTERN_NUMERIC = re.compile(
+    r"^(?P<ref>[A-Z0-9]+)\s+"
+    r"(?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+"
+    r"(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$"
 )
 
-# 2. CONTINUATION LINES (part of description)
-PATTERN_CIMB_CONT = re.compile(
-    r"^(?!\d{2}/\d{2}/\d{4})(?!Opening Balance)(?!CLOSING)(?!Page)(?P<desc>.+)$"
-)
-
-# 3. OPENING / CLOSING BALANCE
-PATTERN_CIMB_BALANCE_ONLY = re.compile(
-    r"""
-    ^(?P<label>Opening Balance|CLOSING BALANCE.*)\s+
-    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$
-    """,
-    re.VERBOSE | re.IGNORECASE
-)
-
-
-# =========================================================
-# PARSER FUNCTION
-# =========================================================
 def parse_transactions_cimb(text: str, page_num: int):
     tx_list = []
-    buffer_desc = None
-    buffer_date = None
+    current_date = None
+    desc_lines = []
+    prev_balance = None
 
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
 
-        # ---------------------------------------------------
-        # Case A — Opening/Closing balance (ignore as TX)
-        # ---------------------------------------------------
-        m_bal = PATTERN_CIMB_BALANCE_ONLY.match(line)
-        if m_bal:
-            buffer_desc = None
-            buffer_date = None
+        # A) DATE LINE (start new transaction)
+        m_date = PATTERN_DATE.match(line)
+        if m_date:
+            # If previous transaction exists but incomplete → ignore
+            current_date = m_date.group("date")
+            desc_lines = [m_date.group("desc")]
             continue
 
-        # ---------------------------------------------------
-        # Case B — Main Transaction Row
-        # ---------------------------------------------------
-        m = PATTERN_CIMB_FULL.match(line)
-        if m:
-            buffer_date = m.group("date")
-            buffer_desc = m.group("desc")
+        # B) NUMERIC LINE (final line of a transaction)
+        m_num = PATTERN_NUMERIC.match(line)
+        if m_num and current_date:
+            ref = m_num.group("ref")
+            amount = float(m_num.group("amount").replace(",", ""))
+            balance = float(m_num.group("balance").replace(",", ""))
 
-            # numeric conversion
-            withdraw_raw = m.group("withdraw")
-            deposit_raw = m.group("deposit")
+            # Determine debit/credit using balance difference
+            if prev_balance is None:
+                debit, credit = 0.0, amount
+            else:
+                if balance < prev_balance:
+                    debit, credit = amount, 0.0
+                else:
+                    debit, credit = 0.0, amount
 
-            withdraw = float(withdraw_raw.replace(",", "")) if withdraw_raw != "-" else 0.0
-            deposit  = float(deposit_raw.replace(",", "")) if deposit_raw != "-" else 0.0
-            balance  = float(m.group("balance").replace(",", ""))
+            prev_balance = balance
 
             tx_list.append({
-                "date": buffer_date,
-                "description": buffer_desc,
-                "ref_no": m.group("ref"),
-                "debit": withdraw,
-                "credit": deposit,
+                "date": current_date,
+                "description": " ".join(desc_lines),
+                "ref_no": ref,
+                "debit": debit,
+                "credit": credit,
                 "balance": balance,
                 "page": page_num
             })
 
+            # Reset for next transaction
+            current_date = None
+            desc_lines = []
             continue
 
-        # ---------------------------------------------------
-        # Case C — Continuation lines (part of description)
-        # ---------------------------------------------------
-        m2 = PATTERN_CIMB_CONT.match(line)
-        if m2 and buffer_desc:
-            # Append extra description lines (multi-line descriptions)
-            tx_list[-1]["description"] += " " + m2.group("desc")
-            continue
+        # C) DESCRIPTION CONTINUATION LINES
+        if current_date:
+            desc_lines.append(line)
 
     return tx_list
