@@ -6,6 +6,7 @@ import pandas as pd
 from maybank import parse_transactions_maybank
 from public_bank import parse_transactions_pbb
 from rhb import parse_transactions_rhb
+from cimb import parse_transactions_cimb   # <-- NEW
 
 
 # ---------------------------------------------------
@@ -24,7 +25,7 @@ st.write("Upload one or more bank statement PDFs to extract transactions into a 
 
 bank_choice = st.selectbox(
     "Select Bank Format",
-    ["Auto-detect", "Maybank", "Public Bank (PBB)", "RHB Bank"]
+    ["Auto-detect", "Maybank", "Public Bank (PBB)", "RHB Bank", "CIMB Bank"]  # <-- NEW
 )
 
 bank_hint = None
@@ -34,6 +35,8 @@ elif bank_choice == "Public Bank (PBB)":
     bank_hint = "pbb"
 elif bank_choice == "RHB Bank":
     bank_hint = "rhb"
+elif bank_choice == "CIMB Bank":
+    bank_hint = "cimb"   # <-- NEW
 
 
 # ---------------------------------------------------
@@ -49,14 +52,23 @@ default_year = st.text_input("Default Year", "2025")
 # ---------------------------------------------------
 
 def auto_detect_and_parse(text, page_num, default_year="2025"):
+
+    # Maybank
     tx = parse_transactions_maybank(text, page_num, default_year)
     if tx:
         return tx
 
+    # Public Bank
     tx = parse_transactions_pbb(text, page_num, default_year)
     if tx:
         return tx
 
+    # CIMB Bank  <-- NEW
+    tx = parse_transactions_cimb(text, page_num)
+    if tx:
+        return tx
+
+    # RHB
     tx = parse_transactions_rhb(text, page_num)
     if tx:
         return tx
@@ -89,6 +101,9 @@ if uploaded_files:
 
                 elif bank_hint == "rhb":
                     tx = parse_transactions_rhb(text, page_num)
+
+                elif bank_hint == "cimb":    # <-- NEW
+                    tx = parse_transactions_cimb(text, page_num)
 
                 else:
                     tx = auto_detect_and_parse(text, page_num, default_year)
