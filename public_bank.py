@@ -33,25 +33,22 @@ def _classify_debit_credit(desc: str, amount: float) -> tuple[float, float]:
     """
     d = desc.upper()
 
-    # Clear credit patterns (money IN)
-    credit_keywords = [
-        "DEP-ECP",               # deposits
-        "DUITNOW TRSF CR",       # DuitNow credit
-        "TSFR FUND CR",          # transfer in
-        "TSFR FUND  CR",
-        "HSE CHEQ RTN",          # house cheque returned -> back to account
-    ]
+credit_keywords = [
+    "DEP-ECP",
+    "DUITNOW TRSF CR",
+    "TSFR FUND CR",
+    "HSE CHEQ RTN"
+]
 
-    # Clear debit patterns (money OUT)
-    debit_keywords = [
-        "DUITNOW TRSF DR",
-        "DR-ECP",
-        " HANDLING CHRG",
-        "CHEQ ",                 # cheque payments
-        "CHQ ",                  # alt spelling
-        "GST DR",
-        " DR ",                  # generic DR
-    ]
+debit_keywords = [
+    "DUITNOW TRSF DR",
+    "DR-ECP",
+    "HANDLING CHRG",
+    "CHEQ ",
+    "CHQ ",
+    "GST DR",
+    " DR "
+]
 
     is_credit = any(k in d for k in credit_keywords)
     is_debit  = any(k in d for k in debit_keywords)
