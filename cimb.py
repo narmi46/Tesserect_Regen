@@ -1,88 +1,108 @@
-import regex as re
+# cimb.py  ← save this file
 
-def parse_transactions_cimb(text: str, page_num: int, default_year="2025"):
-    tx_list = []
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+import re
 
-    current_date = None
-    buffer_desc = []
-    year = default_year
+# Ignore footer/header/garbage lines
+IGNORE_PATTERNS = [
+    r"^CONTINUE NEXT PAGE",
+    r"^You can perform",
+    r"^For more information",
+    r"^Statement of Account",
+    r"^Page / Halaman",
+    r"^CIMB BANK",
+    r"^\(Protected by",
+    r"^Date Description",
+    r"^Tarikh Diskripsi",
+    r"^\(RM\)",
+    r"^Opening Balance",
+    r"^Account No",
+]
 
-    # Detect year in header
-    m = re.search(r"20\d{2}", text)
-    if m:
-        year = m.group(0)
 
-    for line in lines:
+def is_ignored(line):
+    """Return True if a line matches any ignored pattern."""
+    return any(re.match(p, line) for p in IGNORE_PATTERNS)
 
-        # -----------------------------------------
-        # 1. Detect date rows like: 30/06/2024
-        # -----------------------------------------
-        m_date = re.match(r"^(\d{2}/\d{2})(?:/(\d{4}))?$", line)
-        if m_date:
-            # If year missing, insert detected year
-            ddmm = m_date.group(1)
-            yyyy = m_date.group(2) or year
-            current_date = f"{ddmm}/{yyyy}"
 
-            # clear buffer for next description
-            buffer_desc = []
-            continue
+# MAIN CIMB PATTERN (date + desc + ref + amount + balance)
+MAIN_ROW = re.compile(
+    r"^(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(\d{6,12})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$"
+)
 
-        # -----------------------------------------
-        # 2. Identify amount line:
-        #    xxxx.xx   and   balance xxxx.xx
-        # -----------------------------------------
-        m_amt = re.match(
-            r"^(?P<ref>\d{6,})\s+"
-            r"(?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+"
-            r"(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$",
-            line
-        )
-        if m_amt and current_date:
-            ref = m_amt.group("ref")
-            amount = float(m_amt.group("amount").replace(",", ""))
-            balance = float(m_amt.group("balance").replace(",", ""))
 
-            # DESCRIPTION = all buffered lines joined
-            description = " ".join(buffer_desc).strip()
+def parse_transactions_cimb(text, page_num):
+    """
+    Parse CIMB bank statement text for a single page.
+    Returns a list of transaction dictionaries.
+    """
 
-            # Determine credit/debit using balance movement (like your PBB logic)
-            # But since pdf shows deposits under "deposit column", 
-            # CIMB already places deposit as positive, withdrawal negative.
-            # So we infer credit vs debit based on typical pattern:
-            # If description contains TR IBG or REMITTANCE CR → Credit
-            # If contains TR TO SAVINGS, OTHER TRANSFER → Debit
-            desc_upper = description.upper()
-            if any(k in desc_upper for k in ["REMITTANCE", "CR", "I-FUNDS", "FROM"]):
-                credit = amount
-                debit = 0.0
+    lines = text.split("\n")
+    i = 0
+    rows = []
+    previous_balance = None  # needed to detect debit vs credit
+
+    while i < len(lines):
+        line = lines[i].strip()
+
+        match = MAIN_ROW.match(line)
+        if match:
+
+            date, desc, refno, amount, balance = match.groups()
+
+            # Collect additional description lines
+            desc_extra = []
+            j = i + 1
+
+            while j < len(lines):
+
+                next_line = lines[j].strip()
+
+                # stop if next transaction starts
+                if re.match(r"^\d{2}/\d{2}/\d{4}", next_line):
+                    break
+
+                # ignore footer/header lines
+                if not is_ignored(next_line) and next_line.strip():
+                    # stop if next line is a REF line
+                    if re.match(r"^\d{6,12}\s+[\d,]+\.\d{2}", next_line):
+                        break
+                    desc_extra.append(next_line)
+
+                j += 1
+
+            full_desc = desc + " " + " ".join(desc_extra)
+
+            # Convert amounts
+            amount_f = float(amount.replace(",", ""))
+            balance_f = float(balance.replace(",", ""))
+
+            # Determine debit/credit via balance direction
+            if previous_balance is None:
+                # First entry is ambiguous → treat as debit
+                debit = amount_f
+                credit = 0
             else:
-                # default assume debit
-                debit = amount
-                credit = 0.0
+                if balance_f > previous_balance:
+                    credit = amount_f
+                    debit = 0
+                else:
+                    debit = amount_f
+                    credit = 0
 
-            # Format ISO date
-            dd, mm, yyyy = current_date.split("/")
-            iso = f"{yyyy}-{mm}-{dd}"
+            previous_balance = balance_f
 
-            tx_list.append({
-                "date": iso,
-                "description": description,
+            rows.append({
+                "date": date.replace("/", "-"),
+                "description": full_desc,
                 "debit": debit,
                 "credit": credit,
-                "balance": balance,
-                "page": page_num
+                "balance": balance_f,
+                "page": page_num,
             })
 
-            # reset buffer
-            buffer_desc = []
+            i = j
             continue
 
-        # -----------------------------------------
-        # 3. Otherwise accumulate description lines
-        # -----------------------------------------
-        if current_date:
-            buffer_desc.append(line)
+        i += 1
 
-    return tx_list
+    return rows
