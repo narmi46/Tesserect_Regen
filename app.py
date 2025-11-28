@@ -35,8 +35,8 @@ elif bank_choice == "Public Bank (PBB)":
     bank_hint = "pbb"
 elif bank_choice == "RHB Bank":
     bank_hint = "rhb"
-elif bank_choice == "CIMB Bank":
-    bank_hint = "cimb"   # <-- NEW
+elif bank_choice == "CIMB Bank":           # <-- NEW
+    bank_hint = "cimb"
 
 
 # ---------------------------------------------------
@@ -53,27 +53,52 @@ default_year = st.text_input("Default Year", "2025")
 
 def auto_detect_and_parse(text, page_num, default_year="2025"):
 
-    # Maybank
     tx = parse_transactions_maybank(text, page_num, default_year)
     if tx:
         return tx
 
-    # Public Bank
     tx = parse_transactions_pbb(text, page_num, default_year)
     if tx:
         return tx
 
-    # CIMB Bank  <-- NEW
-    tx = parse_transactions_cimb(text, page_num)
+    tx = parse_transactions_cimb(text, page_num)          # <-- NEW
     if tx:
         return tx
 
-    # RHB
     tx = parse_transactions_rhb(text, page_num)
     if tx:
         return tx
 
     return []
+
+
+# ---------------------------------------------------
+# TEXT EXTRACTOR WITH TABLE FALLBACK (for CIMB)
+# ---------------------------------------------------
+
+def extract_text_safely(page):
+
+    # Try normal extraction first
+    text = page.extract_text()
+    if text and text.strip() != "":
+        return text
+
+    # Try table extractor (CIMB PDFs use table layout)
+    try:
+        table = page.extract_table()
+        if table:
+            rows = []
+            for row in table:
+                if row:
+                    cleaned = " ".join([c for c in row if c])
+                    if cleaned.strip():
+                        rows.append(cleaned)
+            if rows:
+                return "\n".join(rows)
+    except:
+        pass
+
+    return ""
 
 
 # ---------------------------------------------------
@@ -90,7 +115,8 @@ if uploaded_files:
         with pdfplumber.open(uploaded_file) as pdf:
 
             for page_num, page in enumerate(pdf.pages, start=1):
-                text = page.extract_text() or ""
+
+                text = extract_text_safely(page)   # <-- UPDATED EXTRACTOR
 
                 # Parse by selected bank or auto-detect
                 if bank_hint == "maybank":
@@ -102,7 +128,7 @@ if uploaded_files:
                 elif bank_hint == "rhb":
                     tx = parse_transactions_rhb(text, page_num)
 
-                elif bank_hint == "cimb":    # <-- NEW
+                elif bank_hint == "cimb":          # <-- NEW
                     tx = parse_transactions_cimb(text, page_num)
 
                 else:
@@ -110,7 +136,7 @@ if uploaded_files:
 
                 # Add to main list
                 for t in tx:
-                    t["source_file"] = uploaded_file.name  # track which PDF it came from
+                    t["source_file"] = uploaded_file.name
 
                 all_tx.extend(tx)
 
@@ -134,7 +160,7 @@ if all_tx:
     json_data = json.dumps(all_tx, indent=4)
     st.download_button("Download JSON", json_data, file_name="transactions.json", mime="application/json")
 
-    # TXT Export (Pretty Table)
+    # TXT Export
     df_txt = df[["date", "description", "debit", "credit", "balance", "source_file"]]
 
     w_date = 12
@@ -153,7 +179,6 @@ if all_tx:
         f"{'FILE':<{w_file}}"
     )
     separator = "-" * len(header)
-
     lines = [header, separator]
 
     for _, row in df_txt.iterrows():
@@ -168,7 +193,6 @@ if all_tx:
         lines.append(line)
 
     txt_data = "\n".join(lines)
-
     st.download_button("Download TXT", txt_data, file_name="transactions.txt", mime="text/plain")
 
 else:
