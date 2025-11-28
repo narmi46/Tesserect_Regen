@@ -1,75 +1,148 @@
 import regex as re
 
-# Date line: "30/05/2024 something"
-PATTERN_DATE = re.compile(r"^(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<desc>.+)$")
+# ---------------------------------------------------------
+# Regex patterns built specifically for CIMB business PDF
+# ---------------------------------------------------------
 
-# Final numeric line:
-# "993830651126 380.00 212,954.99"
-PATTERN_NUMERIC = re.compile(
-    r"^(?P<ref>[A-Z0-9]+)\s+"
-    r"(?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+"
-    r"(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$"
+# Full row WITH date
+RE_ROW_WITH_DATE = re.compile(
+    r"""
+    ^(?P<date>\d{2}/\d{2}/\d{4})\s+
+    (?P<desc>.+?)\s+
+    (?P<ref>\d{6,}|-)?
+    \s+
+    (?P<withdraw>\d{1,3}(?:,\d{3})*\.\d{2}|-)
+    \s+
+    (?P<deposit>\d{1,3}(?:,\d{3})*\.\d{2}|-)
+    \s+
+    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})
+    $
+    """, re.VERBOSE
 )
 
-def parse_transactions_cimb(text: str, page_num: int):
-    tx_list = []
+# Continuation rows (NO date)
+RE_ROW_NO_DATE = re.compile(
+    r"""
+    ^(?P<desc>.+?)\s+
+    (?P<ref>\d{6,}|-)?
+    \s+
+    (?P<withdraw>\d{1,3}(?:,\d{3})*\.\d{2}|-)
+    \s+
+    (?P<deposit>\d{1,3}(?:,\d{3})*\.\d{2}|-)
+    \s+
+    (?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})
+    $
+    """, re.VERBOSE
+)
 
+
+# Opening / closing balance
+RE_BALANCE_ONLY = re.compile(
+    r"""
+    ^(Opening\s+Balance|Closing\s+Balance)\s+
+    (?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# Detect Year from header
+RE_YEAR = re.compile(r"\b(20\d{2})\b")
+
+
+# ---------------------------------------------------------
+# Helper
+# ---------------------------------------------------------
+
+def fix_date(d, default_year="2024"):
+    """Convert DD/MM/YYYY → YYYY-MM-DD"""
+    dd, mm, yyyy = d.split("/")
+    return f"{yyyy}-{mm}-{dd}"
+
+
+# ---------------------------------------------------------
+# Main Parser (compatible with app.py)
+# ---------------------------------------------------------
+
+def parse_transactions_cimb(text: str, page_num: int, default_year="2025"):
+    tx_list = []
     current_date = None
-    desc_lines = []
     prev_balance = None
+
+    # Attempt to detect year from header
+    m_year = RE_YEAR.search(text)
+    year = m_year.group(1) if m_year else default_year
+
+    # Replace DD/MM with DD/MM/YYYY for consistency
+    text = re.sub(r"(\d{2}/\d{2})(?!/\d{4})", r"\1/" + year, text)
 
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
 
-        # A) DATE line (start new transaction)
-        m_date = PATTERN_DATE.match(line)
-        if m_date:
-            # If previous transaction is incomplete → ignore it
-            current_date = m_date.group("date")
-            desc_lines = [m_date.group("desc")]
+        # ------------------------------------------
+        # Balance-only lines
+        # ------------------------------------------
+        m_bal = RE_BALANCE_ONLY.match(line)
+        if m_bal:
+            prev_balance = float(m_bal.group("amount").replace(",", ""))
             continue
 
-        # B) NUMERIC FINAL LINE (ref + amount + balance)
-        m_num = PATTERN_NUMERIC.match(line)
-        if m_num and current_date:
-            ref = m_num.group("ref")
-            amount = float(m_num.group("amount").replace(",", ""))
-            balance = float(m_num.group("balance").replace(",", ""))
+        # ------------------------------------------
+        # Rows WITH date
+        # ------------------------------------------
+        m1 = RE_ROW_WITH_DATE.match(line)
+        if m1:
+            current_date = m1.group("date")
 
-            # Debit/Credit determination using balance difference
-            if prev_balance is None:
-                # First transaction on first page
-                debit = 0.0
-                credit = amount
-            else:
-                if balance < prev_balance:
-                    debit = amount
-                    credit = 0.0
-                else:
-                    debit = 0.0
-                    credit = amount
+            desc = m1.group("desc")
+            ref = m1.group("ref")
 
-            prev_balance = balance
+            withdraw = m1.group("withdraw")
+            deposit = m1.group("deposit")
+
+            debit = float(withdraw.replace(",", "")) if withdraw not in ("-", None) else 0.0
+            credit = float(deposit.replace(",", "")) if deposit not in ("-", None) else 0.0
+
+            balance = float(m1.group("balance").replace(",", ""))
 
             tx_list.append({
-                "date": current_date,
-                "description": " ".join(desc_lines),
-                "ref_no": ref,
+                "date": fix_date(current_date),
+                "description": desc,
                 "debit": debit,
                 "credit": credit,
                 "balance": balance,
-                "page": page_num,
+                "page": page_num
             })
 
-            # reset transaction buffer
-            current_date = None
-            desc_lines = []
+            prev_balance = balance
             continue
 
-        # C) Description continuation
-        if current_date:
-            desc_lines.append(line)
+        # ------------------------------------------
+        # Rows WITHOUT date
+        # ------------------------------------------
+        m2 = RE_ROW_NO_DATE.match(line)
+        if m2 and current_date:
+            desc = m2.group("desc")
+            ref = m2.group("ref")
+
+            withdraw = m2.group("withdraw")
+            deposit = m2.group("deposit")
+
+            debit = float(withdraw.replace(",", "")) if withdraw not in ("-", None) else 0.0
+            credit = float(deposit.replace(",", "")) if deposit not in ("-", None) else 0.0
+
+            balance = float(m2.group("balance").replace(",", ""))
+
+            tx_list.append({
+                "date": fix_date(current_date),
+                "description": desc,
+                "debit": debit,
+                "credit": credit,
+                "balance": balance,
+                "page": page_num
+            })
+
+            prev_balance = balance
+            continue
 
     return tx_list
