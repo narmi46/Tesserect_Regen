@@ -1,5 +1,9 @@
 import re
 
+# -----------------------------------------------------------
+# Utility patterns
+# -----------------------------------------------------------
+
 IGNORE_PATTERNS = [
     r"^CONTINUE NEXT PAGE",
     r"^You can perform",
@@ -8,8 +12,10 @@ IGNORE_PATTERNS = [
     r"^Page / Halaman",
     r"^CIMB BANK",
     r"^\(Protected by",
-    r"^Date Description",
-    r"^Tarikh Diskripsi",
+    r"^Date",
+    r"^Tarikh",
+    r"^Description",
+    r"^Diskripsi",
     r"^\(RM\)",
     r"^Account No",
     r"^Branch / Cawangan",
@@ -19,145 +25,168 @@ IGNORE_PATTERNS = [
     r"^Deposits",
     r"^Balance",
     r"^No of Withdrawal",
-    r"^Bil Pengeluaran",
     r"^No of Deposits",
-    r"^Bil Deposit",
     r"^Total Withdrawal",
-    r"^Jumlah Pengeluaran",
     r"^Total Deposits",
-    r"^Jumlah Deposit",
     r"^CLOSING BALANCE",
     r"^End of Statement",
-    r"^\" # Added to ignore source tags if present in raw text
+    r'^"',  # avoid raw OCR quotes
 ]
 
-def is_ignored(line):
-    return any(re.search(p, line) for p in IGNORE_PATTERNS)
+DATE_RE = r"^(\d{2}/\d{2}/\d{4})"
+MONEY_RE = r"\d{1,3}(?:,\d{3})*\.\d{2}"
 
-# Strict Money Pattern: Matches 1,234.56 or 50.00
-# Enforces exactly 2 decimal places to avoid confusing Ref Nos (integers) with Money.
-MONEY_PATTERN = r"(?<![\d.])\d{1,3}(?:,\d{3})*\.\d{2}(?![\d.])"
+
+def is_ignored(line):
+    return any(re.match(p, line) for p in IGNORE_PATTERNS)
+
+
+def extract_money(text):
+    """Return ONLY proper two-decimal money values."""
+    vals = re.findall(MONEY_RE, text)
+    return [float(v.replace(",", "")) for v in vals]
+
+
+def extract_date(text):
+    m = re.search(DATE_RE, text)
+    if not m:
+        return ""
+    return m.group(1).replace("/", "-")
+
+
+def extract_ref_no(text, money_strings):
+    temp = text
+    for m in money_strings:
+        temp = temp.replace(m, "")
+
+    matches = re.findall(r"\b(\d{5,20})\b", temp)
+    if not matches:
+        return ""
+    # choose the longest and rightmost
+    return sorted(matches, key=lambda x: (len(x), temp.rfind(x)))[-1]
+
+
+def clean_description(text, date_str, ref, money_strings):
+    d = text
+    if date_str:
+        d = d.replace(date_str.replace("-", "/"), "")
+    if ref:
+        d = d.replace(ref, "")
+    for m in money_strings:
+        d = d.replace(m, "")
+
+    d = re.sub(r"\s+", " ", d).strip()
+    return d
+
+
+# -----------------------------------------------------------
+# MAIN FUNCTION (compatible with app.py)
+# -----------------------------------------------------------
 
 def parse_transactions_cimb(text, page_num, source_file):
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    
-    cleaned_rows = []
+    """
+    MUST return ONLY a LIST OF DICTS.
+    Fully compatible with your app.py.
+    """
+
+    raw_lines = [l.strip() for l in text.split("\n") if l.strip()]
+    lines = [l for l in raw_lines if not is_ignored(l)]
+
+    rows = []
     buffer = ""
-    
-    # ----------------------------------------------
-    # 1️⃣ MERGE SPLIT LINES INTO COMPLETE ROW BLOCKS
-    # ----------------------------------------------
+
+    # Step 1: Merge broken lines
     for line in lines:
-        if is_ignored(line):
+
+        if "Opening Balance" in line:
+            if buffer:
+                rows.append(buffer)
+                buffer = ""
+            rows.append(line)
             continue
 
-        # Check for standard Transaction Date start
-        is_date_row = re.search(r"\d{2}/\d{2}/\d{4}", line)
-        
-        # Check for Opening Balance start (special case, no date)
-        is_opening_row = "Opening Balance" in line
-
-        if is_date_row or is_opening_row:
+        if re.search(DATE_RE, line):
             if buffer:
-                cleaned_rows.append(buffer)
+                rows.append(buffer)
             buffer = line
         else:
-            # Append to previous line to fix split descriptions
             buffer += " " + line
 
-    # Append the last buffer remaining
     if buffer:
-        cleaned_rows.append(buffer)
+        rows.append(buffer)
 
-    final_data = []
+    # Step 2: Parse rows
+    tx_list = []
+    prev_balance = None
 
-    # ----------------------------------------------
-    # 2️⃣ EXTRACT COLUMNS
-    # ----------------------------------------------
-    for row in cleaned_rows:
-        # Clean up CSV artifacts if present (quotes)
-        clean_row_text = row.replace('"', '').strip()
+    for row in rows:
 
-        # Find ALL strictly formatted money values in the row
-        money_matches = re.findall(MONEY_PATTERN, clean_row_text)
-        
-        # --- CASE A: Opening Balance ---
-        if "Opening Balance" in clean_row_text:
-            if money_matches:
-                # The only money value in an Opening Balance row is the balance itself
-                balance = float(money_matches[0].replace(",", ""))
-                final_data.append({
-                    "date": "N/A", # Or set to Statement Date if available
-                    "description": "OPENING BALANCE",
-                    "ref_no": "",
-                    "withdrawal": 0.0,
-                    "deposit": 0.0,
-                    "balance": balance,
-                    "page": page_num,
-                    "source_file": source_file
-                })
+        # Opening balance
+        if "Opening Balance" in row:
+            money = extract_money(row)
+            if not money:
+                continue
+
+            bal = money[-1]
+            prev_balance = bal
+
+            tx_list.append({
+                "date": "",
+                "description": "OPENING BALANCE",
+                "ref_no": "",
+                "debit": 0.0,
+                "credit": 0.0,
+                "balance": bal,
+                "page": page_num,
+                "source_file": source_file,
+            })
             continue
 
-        # --- CASE B: Standard Transaction ---
-        # We need at least 2 money values (Amount + Balance) usually, 
-        # or sometimes 1 if it's a weird row, but Balance is ALWAYS the last one.
-        if not money_matches:
+        money_strings = re.findall(MONEY_RE, row)
+        if len(money_strings) < 2:
             continue
 
-        # The LAST money match is ALWAYS the running Balance
-        balance = float(money_matches[-1].replace(",", ""))
-        
-        # The SECOND TO LAST money match is the Transaction Amount (Withdrawal or Deposit)
-        amount = 0.0
-        if len(money_matches) >= 2:
-            amount = float(money_matches[-2].replace(",", ""))
+        money_vals = [float(m.replace(",", "")) for m in money_strings]
+        amount = money_vals[-2]
+        balance = money_vals[-1]
 
-        # Extract Date
-        date_match = re.search(r"(\d{2}/\d{2}/\d{4})", clean_row_text)
-        date = date_match.group(1).replace("/", "-") if date_match else ""
+        date_str = extract_date(row)
+        ref_no = extract_ref_no(row, money_strings)
+        description = clean_description(row, date_str, ref_no, money_strings)
 
-        # Extract Ref No (Look for long integers, 5+ digits)
-        # We exclude the numbers we just identified as money to avoid duplicates
-        temp_text_for_ref = clean_row_text
-        for m in money_matches:
-            temp_text_for_ref = temp_text_for_ref.replace(m, "")
-            
-        refno_match = re.search(r"\b(\d{5,20})\b", temp_text_for_ref)
-        ref_no = refno_match.group(1) if refno_match else ""
+        # Debit vs Credit decision
+        debit = credit = 0.0
 
-        # Extract Description
-        # Remove Date, Ref, and Money from string to leave description
-        description = clean_row_text
-        if date_match: description = description.replace(date_match.group(1), "")
-        if ref_no: description = description.replace(ref_no, "")
-        for m in money_matches:
-            description = description.replace(m, "")
-        
-        # Clean up description whitespace
-        description = re.sub(r'\s+', ' ', description).strip()
-        description = description.replace(" ,", "").replace(",,", "") # Clean CSV remnants
+        if prev_balance is not None:
+            if abs(prev_balance - amount - balance) < 0.01:
+                debit = amount
+            elif abs(prev_balance + amount - balance) < 0.01:
+                credit = amount
+            else:
+                # fallback logic
+                upper = description.upper()
+                if "TR TO" in upper or "DUITNOW TO" in upper or "JOMPAY" in upper:
+                    debit = amount
+                else:
+                    credit = amount
+        else:
+            # First page
+            if "TR TO" in description.upper():
+                debit = amount
+            else:
+                credit = amount
 
-        # Determine if Withdrawal or Deposit based on logical file structure or column position
-        # (Since text extraction loses column position, we infer by common sense or return Raw Amount)
-        # Note: In raw text parsing without x-coordinates, distinguishing Deposit vs Withdrawal 
-        # specifically often requires context. 
-        # Here we return "amount" generic, or you can check if description contains "DEPOSIT" / "CREDIT".
-        
-        # Heuristic: If description contains "CREDIT" or "DEPOSIT", it's likely a deposit.
-        # Otherwise treated as withdrawal for simple categorization, or stored as generic amount.
-        is_deposit = False
-        if "CREDIT" in description.upper() or "DEPOSIT" in description.upper() or "REMITTANCE CR" in description.upper():
-            is_deposit = True
+        prev_balance = balance
 
-        final_data.append({
-            "date": date,
+        tx_list.append({
+            "date": date_str,
             "description": description,
             "ref_no": ref_no,
-            "withdrawal": 0.0 if is_deposit else amount,
-            "deposit": amount if is_deposit else 0.0,
-            "balance": balance,
+            "debit": round(debit, 2),
+            "credit": round(credit, 2),
+            "balance": round(balance, 2),
             "page": page_num,
-            "source_file": source_file
+            "source_file": source_file,
         })
 
-    return final_data
+    return tx_list
