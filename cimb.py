@@ -18,9 +18,9 @@ IGNORE_PATTERNS = [
     r"^Diskripsi",
     r"^\(RM\)",
     r"^Account No",
-    r"^Branch / Cawangan",
+    r"^Branch",
     r"^Current Account Transaction Details",
-    r"^Cheque / Ref No",
+    r"^Cheque",
     r"^Withdrawal",
     r"^Deposits",
     r"^Balance",
@@ -30,7 +30,7 @@ IGNORE_PATTERNS = [
     r"^Total Deposits",
     r"^CLOSING BALANCE",
     r"^End of Statement",
-    r'^"',  # avoid raw OCR quotes
+    r'^"',  # avoid stray OCR text
 ]
 
 DATE_RE = r"^(\d{2}/\d{2}/\d{4})"
@@ -77,12 +77,11 @@ def clean_description(text, date_str, ref, money_strings):
 
 
 # -----------------------------------------------------------
-# FIXED MAIN FUNCTION
+# MAIN FIXED FUNCTION
 # -----------------------------------------------------------
 
 def parse_transactions_cimb(text, page_num, source_file):
 
-    # remove garbage lines
     raw_lines = [l.strip() for l in text.split("\n") if l.strip()]
     lines = [l for l in raw_lines if not is_ignored(l)]
 
@@ -90,25 +89,22 @@ def parse_transactions_cimb(text, page_num, source_file):
     buffer = ""
 
     # -----------------------------------------------------------
-    # ✔ FIX 1: improved merging logic
+    # FIXED MERGING LOGIC – robust CIMB style
     # -----------------------------------------------------------
     for line in lines:
 
         has_date = bool(re.search(DATE_RE, line))
         has_money = bool(re.search(MONEY_RE, line))
 
-        # new transaction begins
         if has_date:
             if buffer:
                 rows.append(buffer)
             buffer = line
-
         else:
-            # continuation line: always append
             buffer += " " + line
 
-        # ✔ FIX 2: if buffer now has ≥2 money amounts → complete row
-        if len(re.findall(MONEY_RE, buffer)) >= 2 and has_date is False:
+        # transaction row complete once 2 money values appear
+        if len(re.findall(MONEY_RE, buffer)) >= 2 and not has_date:
             rows.append(buffer)
             buffer = ""
 
@@ -116,7 +112,7 @@ def parse_transactions_cimb(text, page_num, source_file):
         rows.append(buffer)
 
     # -----------------------------------------------------------
-    # Parse rows into structured data
+    # Parse rows into transaction objects
     # -----------------------------------------------------------
 
     tx_list = []
@@ -124,7 +120,7 @@ def parse_transactions_cimb(text, page_num, source_file):
 
     for row in rows:
 
-        # Opening balance
+        # Opening Balance
         if "Opening Balance" in row:
             money = extract_money(row)
             if not money:
@@ -144,57 +140,64 @@ def parse_transactions_cimb(text, page_num, source_file):
             })
             continue
 
-        # ✔ FIX 3: allow rows with only 1 money value (e.g. JOMPAY partial OCR)
+        # Extract money values
         money_strings = re.findall(MONEY_RE, row)
-        if len(money_strings) < 1:
-            continue
-
         money_vals = [float(m.replace(",", "")) for m in money_strings]
 
-        # ✔ FIX 4: if only one money value, treat it as amount
-        if len(money_vals) == 1:
-            amount = money_vals[0]
-            balance = prev_balance - amount  # fallback guess
-        else:
+        if len(money_vals) < 1:
+            continue
+
+        # If exactly 2 → amount and balance
+        if len(money_vals) >= 2:
             amount = money_vals[-2]
             balance = money_vals[-1]
+        else:
+            # fallback for single value cases (rare)
+            amount = money_vals[0]
+            balance = prev_balance  # temp until next row fixes it
 
         date_str = extract_date(row)
-        ref_no = extract_ref_no(row, money_strings)
-        description = clean_description(row, date_str, ref_no, money_strings)
+        ref = extract_ref_no(row, money_strings)
+        description = clean_description(row, date_str, ref, money_strings)
 
         # -----------------------------------------------------------
-        # ✔ FIX 5: more reliable debit/credit direction logic
+        # FIXED DEBIT/CREDIT LOGIC (BANK LOGIC)
         # -----------------------------------------------------------
-        debit = credit = 0.0
 
-        if prev_balance is not None and len(money_vals) >= 2:
+        withdrawal = 0.0
+        deposit = 0.0
+
+        if prev_balance is not None:
+
+            # withdrawal → decreases balance
             if abs(prev_balance - amount - balance) < 0.02:
-                debit = amount
+                withdrawal = amount
+
+            # deposit → increases balance
             elif abs(prev_balance + amount - balance) < 0.02:
-                credit = amount
+                deposit = amount
+
             else:
-                # fallback by keywords
+                # fallback based on keywords
                 upper = description.upper()
-                if "TR TO" in upper or "DUITNOW TO" in upper or "JOMPAY" in upper:
-                    debit = amount
+
+                if ("TR TO " in upper) or ("DUITNOW TO" in upper) or ("JOMPAY" in upper):
+                    withdrawal = amount
                 else:
-                    credit = amount
+                    deposit = amount
+
         else:
-            # first page fallback
-            if "TR TO" in description.upper():
-                debit = amount
-            else:
-                credit = amount
+            # should not happen after opening balance
+            deposit = amount
 
         prev_balance = balance
 
         tx_list.append({
             "date": date_str,
             "description": description,
-            "ref_no": ref_no,
-            "debit": round(debit, 2),
-            "credit": round(credit, 2),
+            "ref_no": ref,
+            "debit": round(withdrawal, 2),
+            "credit": round(deposit, 2),
             "balance": round(balance, 2),
             "page": page_num,
             "source_file": source_file,
