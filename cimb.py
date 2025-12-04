@@ -34,99 +34,85 @@ IGNORE_PATTERNS = [
 def is_ignored(line):
     return any(re.search(p, line) for p in IGNORE_PATTERNS)
 
-# Extract raw row structure only:
-# DATE  DESCRIPTION  REFNO  AMOUNT  BALANCE
-ROW = re.compile(
-    r"^(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(\d{5,20})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$"
-)
+# Detect ANY numeric group on a line
+NUMBER = r"([\d,]+\.\d{2})"
 
 def parse_transactions_cimb(text, page_num, source_file):
 
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-    raw_rows = []
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
+    cleaned = []
+    buffer = ""
+
+    # ----------------------------------------------
+    # 1️⃣ MERGE SPLIT LINES INTO COMPLETE ROW BLOCKS
+    # ----------------------------------------------
+    for line in lines:
 
         if is_ignored(line):
-            i += 1
             continue
 
-        m = ROW.match(line)
-        if m:
-            date, desc, ref_no, amount, balance = m.groups()
+        # Start of new transaction
+        if re.match(r"\d{2}/\d{2}/\d{4}", line):
+            if buffer:
+                cleaned.append(buffer.strip())
+            buffer = line
+        else:
+            buffer += " " + line
 
-            amount_f = float(amount.replace(",", ""))
-            balance_f = float(balance.replace(",", ""))
+    if buffer:
+        cleaned.append(buffer.strip())
 
-            # Capture multi-line description
-            j = i + 1
-            extra = []
-            while j < len(lines):
-                nl = lines[j]
+    # Now "cleaned" contains FULL reconstructed rows
 
-                if ROW.match(nl): break
-                if is_ignored(nl): break
-                if re.match(r"\d{2}/\d{2}/\d{4}", nl): break
+    final = []
+    i = 0
 
-                extra.append(nl)
-                j += 1
+    # ----------------------------------------------
+    # 2️⃣ EXTRACT COLUMNS SAFELY
+    # ----------------------------------------------
+    for row in cleaned:
 
-            full_desc = desc + " " + " ".join(extra)
-            full_desc = re.sub(r"\s+", " ", full_desc).strip()
+        # Find ALL numeric values in the row
+        nums = re.findall(NUMBER, row)
 
-            raw_rows.append({
-                "date": date.replace("/", "-"),
-                "description": full_desc,
-                "ref_no": ref_no,
-                "amount": amount_f,
-                "balance": balance_f,
-                "page": page_num,
-                "source_file": source_file
-            })
-
-            i = j
+        if len(nums) < 2:
+            # Cannot be a valid row
             continue
 
-        i += 1
+        amount = float(nums[-2].replace(",", ""))
+        balance = float(nums[-1].replace(",", ""))
 
-    # ---------------------------------------------------
-    # DEBIT / CREDIT CLASSIFICATION (your new rule)
-    # ---------------------------------------------------
-    final_rows = []
+        # Extract REFNO (middle digits)
+        refno_match = re.search(r"(\d{5,20})", row)
+        if not refno_match:
+            continue
 
-    for idx in range(len(raw_rows)):
-        current = raw_rows[idx]
+        ref_no = refno_match.group(1)
 
-        # get next balance if exists
-        if idx < len(raw_rows) - 1:
-            next_balance = raw_rows[idx + 1]["balance"]
-        else:
-            # last row = no change
-            next_balance = current["balance"]
+        # Extract date
+        date_match = re.match(r"(\d{2}/\d{2}/\d{4})", row)
+        if not date_match:
+            continue
 
-        delta = next_balance - current["balance"]
+        date = date_match.group(1).replace("/", "-")
 
-        if delta > 0:
-            debit = 0.0
-            credit = abs(delta)
-        elif delta < 0:
-            debit = abs(delta)
-            credit = 0.0
-        else:
-            debit = 0.0
-            credit = 0.0
+        # Extract description = everything between date and refno
+        temp = row.replace(date_match.group(1), "")
+        temp = temp.replace(ref_no, "")
+        # Remove numbers we know
+        temp = temp.replace(nums[-1], "").replace(nums[-2], "")
 
-        final_rows.append({
-            "date": current["date"],
-            "description": current["description"],
-            "ref_no": current["ref_no"],
-            "debit": debit,
-            "credit": credit,
-            "balance": current["balance"],
-            "page": current["page"],
-            "source_file": current["source_file"]
+        description = " ".join(temp.split()).strip()
+
+        final.append({
+            "date": date,
+            "description": description,
+            "ref_no": ref_no,
+            "amount": amount,
+            "balance": balance,
+            "page": page_num,
+            "source_file": source_file
         })
 
-    return final_rows
+    return final
