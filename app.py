@@ -51,7 +51,10 @@ default_year = st.text_input("Default Year", "2025")
 # Auto Detect Parsing Logic
 # ---------------------------------------------------
 
-def auto_detect_and_parse(text, page_num, default_year="2025"):
+def auto_detect_and_parse(text, page_num, default_year="2025", **source_file_kwargs): # **CHANGE 1: Added kwargs to capture source_file if passed
+    
+    # Use a placeholder if source_file is not explicitly passed (e.g., during auto-detect check)
+    source_file = source_file_kwargs.get("source_file", "AutoDetect")
 
     # Maybank
     tx = parse_transactions_maybank(text, page_num, default_year)
@@ -64,7 +67,7 @@ def auto_detect_and_parse(text, page_num, default_year="2025"):
         return tx
 
     # CIMB Bank  <-- NEW
-    tx = parse_transactions_cimb(text, page_num)
+    tx = parse_transactions_cimb(text, page_num, source_file) # **CHANGE 2: Pass source_file**
     if tx:
         return tx
 
@@ -103,10 +106,10 @@ if uploaded_files:
                     tx = parse_transactions_rhb(text, page_num)
 
                 elif bank_hint == "cimb":    # <-- NEW
-                    tx = parse_transactions_cimb(text, page_num)
+                    tx = parse_transactions_cimb(text, page_num, uploaded_file.name) # **CHANGE 3: Pass uploaded_file.name**
 
                 else:
-                    tx = auto_detect_and_parse(text, page_num, default_year)
+                    tx = auto_detect_and_parse(text, page_num, default_year, source_file=uploaded_file.name) # **CHANGE 4: Pass source_file**
 
                 # Add to main list
                 for t in tx:
@@ -125,7 +128,7 @@ if all_tx:
     df = pd.DataFrame(all_tx)
 
     # Arrange columns nicely
-    column_order = ["date", "description", "debit", "credit", "balance", "page", "source_file"]
+    column_order = ["date", "description", "debit", "credit", "balance", "page", "ref_no", "source_file"] # **CHANGE 5: Added ref_no**
     df = df[[c for c in column_order if c in df.columns]]
 
     st.dataframe(df, use_container_width=True)
