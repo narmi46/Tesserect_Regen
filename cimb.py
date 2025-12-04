@@ -35,24 +35,20 @@ def is_ignored(line):
     return any(re.search(p, line) for p in IGNORE_PATTERNS)
 
 
-# Recognize CIMB row:
-# DATE  DESCRIPTION  REFNO  AMOUNT  BALANCE
 ROW = re.compile(
     r"^(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(\d{5,20})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$"
 )
 
 def parse_transactions_cimb(text, page_num, source_file):
-
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-    tx_list = []
-
-    previous_balance = None
+    
+    # Extract raw rows first (no debit/credit yet)
+    raw = []
     i = 0
 
     while i < len(lines):
 
         line = lines[i]
-
         if is_ignored(line):
             i += 1
             continue
@@ -60,32 +56,14 @@ def parse_transactions_cimb(text, page_num, source_file):
         m = ROW.match(line)
         if m:
             date, desc, ref_no, amount, balance = m.groups()
-
             amount_f = float(amount.replace(",", ""))
             balance_f = float(balance.replace(",", ""))
 
-            # Determine debit/credit using balance direction
-            if previous_balance is None:
-                # First entry on statement → cannot determine yet
-                debit = 0.0
-                credit = amount_f
-            else:
-                if balance_f > previous_balance:
-                    credit = amount_f
-                    debit = 0.0
-                else:
-                    debit = amount_f
-                    credit = 0.0
-
-            previous_balance = balance_f
-
-            # Capture multi-line description
+            # Capture multi-line descriptions
             j = i + 1
             extra_desc = []
-
             while j < len(lines):
                 nl = lines[j]
-
                 if ROW.match(nl):
                     break
                 if is_ignored(nl):
@@ -99,12 +77,11 @@ def parse_transactions_cimb(text, page_num, source_file):
             full_desc = desc + " " + " ".join(extra_desc)
             full_desc = re.sub(r"\s+", " ", full_desc).strip()
 
-            tx_list.append({
+            raw.append({
                 "date": date.replace("/", "-"),
                 "description": full_desc,
                 "ref_no": ref_no,
-                "debit": debit,
-                "credit": credit,
+                "amount": amount_f,
                 "balance": balance_f,
                 "page": page_num,
                 "source_file": source_file
@@ -115,4 +92,33 @@ def parse_transactions_cimb(text, page_num, source_file):
 
         i += 1
 
-    return tx_list
+    # NOW assign debit/credit using NEXT balance
+    for idx in range(len(raw)):
+        current = raw[idx]
+
+        if idx < len(raw) - 1:
+            next_balance = raw[idx + 1]["balance"]
+        else:
+            # Last transaction on statement:
+            next_balance = current["balance"]  # no movement
+       
+        delta = next_balance - current["balance"]
+        
+        if abs(delta - current["amount"]) < 0.01:
+            current["debit"] = 0.0
+            current["credit"] = current["amount"]
+        elif abs(delta + current["amount"]) < 0.01:
+            current["debit"] = current["amount"]
+            current["credit"] = 0.0
+        else:
+            # Fallback (rare cases)
+            if current["amount"] > 0:
+                current["credit"] = current["amount"]
+                current["debit"] = 0.0
+            else:
+                current["debit"] = abs(current["amount"])
+                current["credit"] = 0.0
+
+        del current["amount"]  # not needed anymore
+
+    return raw
