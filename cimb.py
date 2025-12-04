@@ -35,10 +35,10 @@ def is_ignored(line):
     return any(re.search(p, line) for p in IGNORE_PATTERNS)
 
 
-# Recognize basic CIMB row:
+# Recognize CIMB row:
 # DATE  DESCRIPTION  REFNO  AMOUNT  BALANCE
-BASIC_ROW = re.compile(
-    r"^(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(\d{6,20})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$"
+ROW = re.compile(
+    r"^(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(\d{5,20})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$"
 )
 
 def parse_transactions_cimb(text, page_num, source_file):
@@ -53,12 +53,11 @@ def parse_transactions_cimb(text, page_num, source_file):
 
         line = lines[i]
 
-        # Skip non-transaction rows
         if is_ignored(line):
             i += 1
             continue
 
-        m = BASIC_ROW.match(line)
+        m = ROW.match(line)
         if m:
             date, desc, ref_no, amount, balance = m.groups()
 
@@ -66,14 +65,10 @@ def parse_transactions_cimb(text, page_num, source_file):
             balance_f = float(balance.replace(",", ""))
 
             # Determine debit/credit using balance direction
-            # If balance goes UP from previous balance → CREDIT
-            # If balance goes DOWN → DEBIT
-
             if previous_balance is None:
-                # First transaction on the page: infer from context
-                # Typically CIMB lists newest → oldest OR oldest → newest
-                debit = amount_f
-                credit = 0.0
+                # First entry on statement → cannot determine yet
+                debit = 0.0
+                credit = amount_f
             else:
                 if balance_f > previous_balance:
                     credit = amount_f
@@ -84,21 +79,21 @@ def parse_transactions_cimb(text, page_num, source_file):
 
             previous_balance = balance_f
 
-            # Attach multiline description if exists
+            # Capture multi-line description
             j = i + 1
             extra_desc = []
 
             while j < len(lines):
                 nl = lines[j]
 
-                if BASIC_ROW.match(nl):
+                if ROW.match(nl):
                     break
                 if is_ignored(nl):
                     break
                 if re.match(r"\d{2}/\d{2}/\d{4}", nl):
                     break
 
-                extra_desc.append(nl.strip())
+                extra_desc.append(nl)
                 j += 1
 
             full_desc = desc + " " + " ".join(extra_desc)
