@@ -11,7 +11,6 @@ IGNORE_PATTERNS = [
     r"^Date Description",
     r"^Tarikh Diskripsi",
     r"^\(RM\)",
-    r"^Opening Balance",
     r"^Account No",
     r"^Branch / Cawangan",
     r"^Current Account Transaction Details",
@@ -29,90 +28,136 @@ IGNORE_PATTERNS = [
     r"^Jumlah Deposit",
     r"^CLOSING BALANCE",
     r"^End of Statement",
+    r"^\" # Added to ignore source tags if present in raw text
 ]
 
 def is_ignored(line):
     return any(re.search(p, line) for p in IGNORE_PATTERNS)
 
-# Detect ANY numeric group on a line
-NUMBER = r"([\d,]+\.\d{2})"
+# Strict Money Pattern: Matches 1,234.56 or 50.00
+# Enforces exactly 2 decimal places to avoid confusing Ref Nos (integers) with Money.
+MONEY_PATTERN = r"(?<![\d.])\d{1,3}(?:,\d{3})*\.\d{2}(?![\d.])"
 
 def parse_transactions_cimb(text, page_num, source_file):
-
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-    cleaned = []
+    
+    cleaned_rows = []
     buffer = ""
-
+    
     # ----------------------------------------------
     # 1️⃣ MERGE SPLIT LINES INTO COMPLETE ROW BLOCKS
     # ----------------------------------------------
     for line in lines:
-
         if is_ignored(line):
             continue
 
-        # Start of new transaction
-        if re.match(r"\d{2}/\d{2}/\d{4}", line):
+        # Check for standard Transaction Date start
+        is_date_row = re.search(r"\d{2}/\d{2}/\d{4}", line)
+        
+        # Check for Opening Balance start (special case, no date)
+        is_opening_row = "Opening Balance" in line
+
+        if is_date_row or is_opening_row:
             if buffer:
-                cleaned.append(buffer.strip())
+                cleaned_rows.append(buffer)
             buffer = line
         else:
+            # Append to previous line to fix split descriptions
             buffer += " " + line
 
+    # Append the last buffer remaining
     if buffer:
-        cleaned.append(buffer.strip())
+        cleaned_rows.append(buffer)
 
-    # Now "cleaned" contains FULL reconstructed rows
-
-    final = []
-    i = 0
+    final_data = []
 
     # ----------------------------------------------
-    # 2️⃣ EXTRACT COLUMNS SAFELY
+    # 2️⃣ EXTRACT COLUMNS
     # ----------------------------------------------
-    for row in cleaned:
+    for row in cleaned_rows:
+        # Clean up CSV artifacts if present (quotes)
+        clean_row_text = row.replace('"', '').strip()
 
-        # Find ALL numeric values in the row
-        nums = re.findall(NUMBER, row)
-
-        if len(nums) < 2:
-            # Cannot be a valid row
+        # Find ALL strictly formatted money values in the row
+        money_matches = re.findall(MONEY_PATTERN, clean_row_text)
+        
+        # --- CASE A: Opening Balance ---
+        if "Opening Balance" in clean_row_text:
+            if money_matches:
+                # The only money value in an Opening Balance row is the balance itself
+                balance = float(money_matches[0].replace(",", ""))
+                final_data.append({
+                    "date": "N/A", # Or set to Statement Date if available
+                    "description": "OPENING BALANCE",
+                    "ref_no": "",
+                    "withdrawal": 0.0,
+                    "deposit": 0.0,
+                    "balance": balance,
+                    "page": page_num,
+                    "source_file": source_file
+                })
             continue
 
-        amount = float(nums[-2].replace(",", ""))
-        balance = float(nums[-1].replace(",", ""))
-
-        # Extract REFNO (middle digits)
-        refno_match = re.search(r"(\d{5,20})", row)
-        if not refno_match:
+        # --- CASE B: Standard Transaction ---
+        # We need at least 2 money values (Amount + Balance) usually, 
+        # or sometimes 1 if it's a weird row, but Balance is ALWAYS the last one.
+        if not money_matches:
             continue
 
-        ref_no = refno_match.group(1)
+        # The LAST money match is ALWAYS the running Balance
+        balance = float(money_matches[-1].replace(",", ""))
+        
+        # The SECOND TO LAST money match is the Transaction Amount (Withdrawal or Deposit)
+        amount = 0.0
+        if len(money_matches) >= 2:
+            amount = float(money_matches[-2].replace(",", ""))
 
-        # Extract date
-        date_match = re.match(r"(\d{2}/\d{2}/\d{4})", row)
-        if not date_match:
-            continue
+        # Extract Date
+        date_match = re.search(r"(\d{2}/\d{2}/\d{4})", clean_row_text)
+        date = date_match.group(1).replace("/", "-") if date_match else ""
 
-        date = date_match.group(1).replace("/", "-")
+        # Extract Ref No (Look for long integers, 5+ digits)
+        # We exclude the numbers we just identified as money to avoid duplicates
+        temp_text_for_ref = clean_row_text
+        for m in money_matches:
+            temp_text_for_ref = temp_text_for_ref.replace(m, "")
+            
+        refno_match = re.search(r"\b(\d{5,20})\b", temp_text_for_ref)
+        ref_no = refno_match.group(1) if refno_match else ""
 
-        # Extract description = everything between date and refno
-        temp = row.replace(date_match.group(1), "")
-        temp = temp.replace(ref_no, "")
-        # Remove numbers we know
-        temp = temp.replace(nums[-1], "").replace(nums[-2], "")
+        # Extract Description
+        # Remove Date, Ref, and Money from string to leave description
+        description = clean_row_text
+        if date_match: description = description.replace(date_match.group(1), "")
+        if ref_no: description = description.replace(ref_no, "")
+        for m in money_matches:
+            description = description.replace(m, "")
+        
+        # Clean up description whitespace
+        description = re.sub(r'\s+', ' ', description).strip()
+        description = description.replace(" ,", "").replace(",,", "") # Clean CSV remnants
 
-        description = " ".join(temp.split()).strip()
+        # Determine if Withdrawal or Deposit based on logical file structure or column position
+        # (Since text extraction loses column position, we infer by common sense or return Raw Amount)
+        # Note: In raw text parsing without x-coordinates, distinguishing Deposit vs Withdrawal 
+        # specifically often requires context. 
+        # Here we return "amount" generic, or you can check if description contains "DEPOSIT" / "CREDIT".
+        
+        # Heuristic: If description contains "CREDIT" or "DEPOSIT", it's likely a deposit.
+        # Otherwise treated as withdrawal for simple categorization, or stored as generic amount.
+        is_deposit = False
+        if "CREDIT" in description.upper() or "DEPOSIT" in description.upper() or "REMITTANCE CR" in description.upper():
+            is_deposit = True
 
-        final.append({
+        final_data.append({
             "date": date,
             "description": description,
             "ref_no": ref_no,
-            "amount": amount,
+            "withdrawal": 0.0 if is_deposit else amount,
+            "deposit": amount if is_deposit else 0.0,
             "balance": balance,
             "page": page_num,
             "source_file": source_file
         })
 
-    return final
+    return final_data
