@@ -50,25 +50,23 @@ default_year = st.text_input("Default Year", "2025")
 def auto_detect_and_parse(text, page_obj, page_num, default_year="2025", **source_file_kwargs):
     """
     Tries all parsers. 
-    Note: CIMB requires 'page_obj' (the pdfplumber page), others utilize 'text'.
     """
     source_file = source_file_kwargs.get("source_file", "AutoDetect")
 
-    # 1. Check CIMB (Precise table check using page object)
+    # CIMB parser
     if "CIMB" in text or "cimb" in text.lower():
-        if page_obj:
-            tx = parse_transactions_cimb(page_obj, page_num, source_file)
-            if tx: return tx
+        tx = parse_transactions_cimb(page_obj, page_num, source_file)
+        if tx: return tx
 
-    # 2. Maybank
+    # Maybank
     tx = parse_transactions_maybank(text, page_num, default_year)
     if tx: return tx
 
-    # 3. Public Bank
+    # Public Bank
     tx = parse_transactions_pbb(text, page_num, default_year)
     if tx: return tx
 
-    # 4. RHB
+    # RHB
     tx = parse_transactions_rhb(text, page_num)
     if tx: return tx
 
@@ -87,11 +85,8 @@ if uploaded_files:
         try:
             with pdfplumber.open(uploaded_file) as pdf:
                 for page_num, page in enumerate(pdf.pages, start=1):
-                    
-                    # Extract raw text for text-based parsers (Maybank/PBB/RHB)
+
                     text = page.extract_text() or ""
-                    
-                    # --- ROUTING LOGIC ---
                     tx = []
 
                     if bank_hint == "maybank":
@@ -104,27 +99,53 @@ if uploaded_files:
                         tx = parse_transactions_rhb(text, page_num)
 
                     elif bank_hint == "cimb":
-                        # UPDATED: Pass the 'page' object, not just text
                         tx = parse_transactions_cimb(page, page_num, uploaded_file.name)
 
                     else:
-                        # Auto-detect: Pass both text and page object
                         tx = auto_detect_and_parse(
-                            text=text, 
-                            page_obj=page, 
-                            page_num=page_num, 
-                            default_year=default_year, 
+                            text=text,
+                            page_obj=page,
+                            page_num=page_num,
+                            default_year=default_year,
                             source_file=uploaded_file.name
                         )
 
-                    # Add to master list
                     if tx:
                         for t in tx:
                             t["source_file"] = uploaded_file.name
                         all_tx.extend(tx)
-                        
+
         except Exception as e:
             st.error(f"Error processing {uploaded_file.name}: {e}")
+
+# ---------------------------------------------------
+# ASCII TABLE EXPORT FUNCTION
+# ---------------------------------------------------
+
+def dataframe_to_ascii(df):
+    # Convert all cells to strings
+    df_str = df.astype(str)
+
+    # Compute column widths
+    col_widths = {col: max(df_str[col].map(len).max(), len(col)) for col in df_str.columns}
+
+    # Build horizontal separator
+    separator = "+".join("-" * (col_widths[col] + 2) for col in df_str.columns)
+    separator = "+" + separator + "+"
+
+    # Build header row
+    header = "|" + "|".join(f" {col.ljust(col_widths[col])} " for col in df_str.columns) + "|"
+
+    # Build data rows
+    rows = [
+        "|" + "|".join(f" {str(val).ljust(col_widths[col])} " for col, val in row.items()) + "|"
+        for _, row in df_str.iterrows()
+    ]
+
+    # Join all parts
+    table = "\n".join([separator, header, separator] + rows + [separator])
+    return table
+
 
 # ---------------------------------------------------
 # Display Results
@@ -132,22 +153,27 @@ if uploaded_files:
 
 if all_tx:
     st.subheader("Extracted Transactions")
-    
+
     df = pd.DataFrame(all_tx)
-    
-    # Normalize columns
-    cols = ["date", "description", "debit", "credit", "balance", "ref_no", "page", "source_file"]
+
+    cols = ["date", "description", "debit", "credit", "balance", "page", "source_file"]
     df = df[[c for c in cols if c in df.columns]]
-    
+
     st.dataframe(df, use_container_width=True)
 
     # JSON Download
     json_data = json.dumps(all_tx, indent=4)
     st.download_button("Download JSON", json_data, file_name="transactions.json", mime="application/json")
 
-    # CSV Download (Easier for Excel)
-    csv_data = df.to_csv(index=False).encode('utf-8')
-    st.download_button("Download CSV", csv_data, file_name="transactions.csv", mime="text/csv")
+    # TXT (ASCII TABLE) Download
+    ascii_txt = dataframe_to_ascii(df)
+
+    st.download_button(
+        "Download TXT (ASCII Table)",
+        ascii_txt,
+        file_name="transactions.txt",
+        mime="text/plain"
+    )
 
 else:
     if uploaded_files:
