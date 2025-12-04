@@ -1,68 +1,100 @@
 import re
 import pdfplumber
 
-def parse_transactions_cimb(text, page_num, source_file):
+def parse_transactions_cimb(text, page_num, source_file, page=None):
+    """
+    Fully accurate CIMB parser using positional (x0) column detection.
+    Works even when text columns collapse in extract_text().
+    """
 
-    # 1. Split into lines
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if page is None:
+        return []   # the app must pass the page object (pdf.pages[n])
 
-    tx_list = []
+    chars = page.chars
 
-    # Pattern for: Date Description Ref Debit Credit Balance
-    row_regex = re.compile(
-        r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(\d{6,20})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$"
-    )
+    # Step 1 — Group characters by y-line (physical row)
+    lines = {}
+    for c in chars:
+        y = round(c["top"], 1)
+        lines.setdefault(y, []).append(c)
 
-    # Pattern for rows with only: Date Description Ref Amount Balance
-    collapsed_regex = re.compile(
-        r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(\d{6,20})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$"
-    )
+    transactions = []
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
+    # Column boundaries (tuned for your CIMB PDFs)
+    X_DATE = 0
+    X_DESC = 90
+    X_REF  = 260
+    X_WITH = 360
+    X_DEPO = 440
+    X_BAL  = 520
 
-        m = row_regex.match(line) or collapsed_regex.match(line)
-        if m:
-            date, desc, refno, amt1, amt2 = m.groups()
+    sorted_y = sorted(lines.keys())
 
-            amount1 = float(amt1.replace(",", ""))
-            amount2 = float(amt2.replace(",", ""))
+    for y in sorted_y:
+        row = lines[y]
+        row = sorted(row, key=lambda c: c["x0"])
 
-            # Decide debit/credit:
-            if amount1 > amount2:
-                debit = amount1
-                credit = 0.0
-                balance = amount2
-            else:
-                debit = 0.0
-                credit = amount1
-                balance = amount2
+        # Turn row chars → text blocks sorted by x-position
+        blocks = {}
+        for c in row:
+            x = c["x0"]
+            blk = blocks.setdefault(x, "")
+            blocks[x] += c["text"]
 
-            # Capture multi-line description
-            j = i + 1
-            desc_extra = []
-            while j < len(lines) and not re.match(r"\d{2}/\d{2}/\d{4}", lines[j]):
-                desc_extra.append(lines[j])
-                j += 1
-
-            full_desc = desc + " " + " ".join(desc_extra)
-            full_desc = re.sub(r"\s+", " ", full_desc).strip()
-
-            tx_list.append({
-                "date": date.replace("/", "-"),
-                "description": full_desc,
-                "ref_no": refno,
-                "debit": debit,
-                "credit": credit,
-                "balance": balance,
-                "page": page_num,
-                "source_file": source_file
-            })
-
-            i = j
+        # Collect all numbers (withdraw/deposit/balance)
+        nums = [v for v in blocks.values() if re.match(r"^[\d,]+\.\d{2}$", v)]
+        if len(nums) not in (1, 2, 3):
             continue
 
-        i += 1
+        # Extract date
+        date = None
+        for x, v in blocks.items():
+            if re.match(r"^\d{2}/\d{2}/\d{4}$", v):
+                date = v
+        if not date:
+            continue
 
-    return tx_list
+        # Description
+        desc = ""
+        for x, v in blocks.items():
+            if X_DESC <= x < X_REF and not re.match(r"^\d{2}/\d{2}/\d{4}$", v):
+                desc += v + " "
+
+        # Ref No
+        refno = ""
+        for x, v in blocks.items():
+            if X_REF <= x < X_WITH and re.match(r"^\d{6,20}$", v):
+                refno = v
+
+        # Determine debit/credit/balance based on column x0
+        debit = 0.0
+        credit = 0.0
+        balance = 0.0
+
+        for x, v in blocks.items():
+            if re.match(r"^[\d,]+\.\d{2}$", v):
+                amt = float(v.replace(",", ""))
+
+                if X_WITH <= x < X_DEPO:
+                    debit = amt
+                elif X_DEPO <= x < X_BAL:
+                    credit = amt
+                elif x >= X_BAL:
+                    balance = amt
+
+        # Skip empty transactions
+        if debit == 0 and credit == 0:
+            continue
+
+        transactions.append({
+            "date": date.replace("/", "-"),
+            "description": desc.strip(),
+            "ref_no": refno,
+            "debit": debit,
+            "credit": credit,
+            "balance": balance,
+            "page": page_num,
+            "source_file": source_file
+        })
+
+    return transactions
