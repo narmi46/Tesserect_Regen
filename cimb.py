@@ -42,16 +42,13 @@ def is_ignored(line):
 
 
 def extract_money(text):
-    """Return ONLY proper two-decimal money values."""
     vals = re.findall(MONEY_RE, text)
     return [float(v.replace(",", "")) for v in vals]
 
 
 def extract_date(text):
     m = re.search(DATE_RE, text)
-    if not m:
-        return ""
-    return m.group(1).replace("/", "-")
+    return m.group(1).replace("/", "-") if m else ""
 
 
 def extract_ref_no(text, money_strings):
@@ -62,7 +59,6 @@ def extract_ref_no(text, money_strings):
     matches = re.findall(r"\b(\d{5,20})\b", temp)
     if not matches:
         return ""
-    # choose the longest and rightmost
     return sorted(matches, key=lambda x: (len(x), temp.rfind(x)))[-1]
 
 
@@ -72,6 +68,7 @@ def clean_description(text, date_str, ref, money_strings):
         d = d.replace(date_str.replace("-", "/"), "")
     if ref:
         d = d.replace(ref, "")
+
     for m in money_strings:
         d = d.replace(m, "")
 
@@ -80,42 +77,48 @@ def clean_description(text, date_str, ref, money_strings):
 
 
 # -----------------------------------------------------------
-# MAIN FUNCTION (compatible with app.py)
+# FIXED MAIN FUNCTION
 # -----------------------------------------------------------
 
 def parse_transactions_cimb(text, page_num, source_file):
-    """
-    MUST return ONLY a LIST OF DICTS.
-    Fully compatible with your app.py.
-    """
 
+    # remove garbage lines
     raw_lines = [l.strip() for l in text.split("\n") if l.strip()]
     lines = [l for l in raw_lines if not is_ignored(l)]
 
     rows = []
     buffer = ""
 
-    # Step 1: Merge broken lines
+    # -----------------------------------------------------------
+    # ✔ FIX 1: improved merging logic
+    # -----------------------------------------------------------
     for line in lines:
 
-        if "Opening Balance" in line:
-            if buffer:
-                rows.append(buffer)
-                buffer = ""
-            rows.append(line)
-            continue
+        has_date = bool(re.search(DATE_RE, line))
+        has_money = bool(re.search(MONEY_RE, line))
 
-        if re.search(DATE_RE, line):
+        # new transaction begins
+        if has_date:
             if buffer:
                 rows.append(buffer)
             buffer = line
+
         else:
+            # continuation line: always append
             buffer += " " + line
+
+        # ✔ FIX 2: if buffer now has ≥2 money amounts → complete row
+        if len(re.findall(MONEY_RE, buffer)) >= 2 and has_date is False:
+            rows.append(buffer)
+            buffer = ""
 
     if buffer:
         rows.append(buffer)
 
-    # Step 2: Parse rows
+    # -----------------------------------------------------------
+    # Parse rows into structured data
+    # -----------------------------------------------------------
+
     tx_list = []
     prev_balance = None
 
@@ -126,7 +129,6 @@ def parse_transactions_cimb(text, page_num, source_file):
             money = extract_money(row)
             if not money:
                 continue
-
             bal = money[-1]
             prev_balance = bal
 
@@ -142,35 +144,44 @@ def parse_transactions_cimb(text, page_num, source_file):
             })
             continue
 
+        # ✔ FIX 3: allow rows with only 1 money value (e.g. JOMPAY partial OCR)
         money_strings = re.findall(MONEY_RE, row)
-        if len(money_strings) < 2:
+        if len(money_strings) < 1:
             continue
 
         money_vals = [float(m.replace(",", "")) for m in money_strings]
-        amount = money_vals[-2]
-        balance = money_vals[-1]
+
+        # ✔ FIX 4: if only one money value, treat it as amount
+        if len(money_vals) == 1:
+            amount = money_vals[0]
+            balance = prev_balance - amount  # fallback guess
+        else:
+            amount = money_vals[-2]
+            balance = money_vals[-1]
 
         date_str = extract_date(row)
         ref_no = extract_ref_no(row, money_strings)
         description = clean_description(row, date_str, ref_no, money_strings)
 
-        # Debit vs Credit decision
+        # -----------------------------------------------------------
+        # ✔ FIX 5: more reliable debit/credit direction logic
+        # -----------------------------------------------------------
         debit = credit = 0.0
 
-        if prev_balance is not None:
-            if abs(prev_balance - amount - balance) < 0.01:
+        if prev_balance is not None and len(money_vals) >= 2:
+            if abs(prev_balance - amount - balance) < 0.02:
                 debit = amount
-            elif abs(prev_balance + amount - balance) < 0.01:
+            elif abs(prev_balance + amount - balance) < 0.02:
                 credit = amount
             else:
-                # fallback logic
+                # fallback by keywords
                 upper = description.upper()
                 if "TR TO" in upper or "DUITNOW TO" in upper or "JOMPAY" in upper:
                     debit = amount
                 else:
                     credit = amount
         else:
-            # First page
+            # first page fallback
             if "TR TO" in description.upper():
                 debit = amount
             else:
