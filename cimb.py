@@ -1,100 +1,123 @@
 import re
-import pdfplumber
 
-def parse_transactions_cimb(text, page_num, source_file, page=None):
-    """
-    Fully accurate CIMB parser using positional (x0) column detection.
-    Works even when text columns collapse in extract_text().
-    """
+IGNORE_PATTERNS = [
+    r"^CONTINUE NEXT PAGE",
+    r"^You can perform",
+    r"^For more information",
+    r"^Statement of Account",
+    r"^Page / Halaman",
+    r"^CIMB BANK",
+    r"^\(Protected by",
+    r"^Date Description",
+    r"^Tarikh Diskripsi",
+    r"^\(RM\)",
+    r"^Opening Balance",
+    r"^Account No",
+    r"^Branch / Cawangan",
+    r"^Current Account Transaction Details",
+    r"^Cheque / Ref No",
+    r"^Withdrawal",
+    r"^Deposits",
+    r"^Balance",
+    r"^No of Withdrawal",
+    r"^Bil Pengeluaran",
+    r"^No of Deposits",
+    r"^Bil Deposit",
+    r"^Total Withdrawal",
+    r"^Jumlah Pengeluaran",
+    r"^Total Deposits",
+    r"^Jumlah Deposit",
+    r"^CLOSING BALANCE",
+    r"^End of Statement",
+]
 
-    if page is None:
-        return []   # the app must pass the page object (pdf.pages[n])
+def is_ignored(line):
+    return any(re.search(p, line) for p in IGNORE_PATTERNS)
 
-    chars = page.chars
 
-    # Step 1 — Group characters by y-line (physical row)
-    lines = {}
-    for c in chars:
-        y = round(c["top"], 1)
-        lines.setdefault(y, []).append(c)
+# Recognize basic CIMB row:
+# DATE  DESCRIPTION  REFNO  AMOUNT  BALANCE
+BASIC_ROW = re.compile(
+    r"^(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(\d{6,20})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$"
+)
 
-    transactions = []
+def parse_transactions_cimb(text, page_num, source_file):
 
-    # Column boundaries (tuned for your CIMB PDFs)
-    X_DATE = 0
-    X_DESC = 90
-    X_REF  = 260
-    X_WITH = 360
-    X_DEPO = 440
-    X_BAL  = 520
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    tx_list = []
 
-    sorted_y = sorted(lines.keys())
+    previous_balance = None
+    i = 0
 
-    for y in sorted_y:
-        row = lines[y]
-        row = sorted(row, key=lambda c: c["x0"])
+    while i < len(lines):
 
-        # Turn row chars → text blocks sorted by x-position
-        blocks = {}
-        for c in row:
-            x = c["x0"]
-            blk = blocks.setdefault(x, "")
-            blocks[x] += c["text"]
+        line = lines[i]
 
-        # Collect all numbers (withdraw/deposit/balance)
-        nums = [v for v in blocks.values() if re.match(r"^[\d,]+\.\d{2}$", v)]
-        if len(nums) not in (1, 2, 3):
+        # Skip non-transaction rows
+        if is_ignored(line):
+            i += 1
             continue
 
-        # Extract date
-        date = None
-        for x, v in blocks.items():
-            if re.match(r"^\d{2}/\d{2}/\d{4}$", v):
-                date = v
-        if not date:
+        m = BASIC_ROW.match(line)
+        if m:
+            date, desc, ref_no, amount, balance = m.groups()
+
+            amount_f = float(amount.replace(",", ""))
+            balance_f = float(balance.replace(",", ""))
+
+            # Determine debit/credit using balance direction
+            # If balance goes UP from previous balance → CREDIT
+            # If balance goes DOWN → DEBIT
+
+            if previous_balance is None:
+                # First transaction on the page: infer from context
+                # Typically CIMB lists newest → oldest OR oldest → newest
+                debit = amount_f
+                credit = 0.0
+            else:
+                if balance_f > previous_balance:
+                    credit = amount_f
+                    debit = 0.0
+                else:
+                    debit = amount_f
+                    credit = 0.0
+
+            previous_balance = balance_f
+
+            # Attach multiline description if exists
+            j = i + 1
+            extra_desc = []
+
+            while j < len(lines):
+                nl = lines[j]
+
+                if BASIC_ROW.match(nl):
+                    break
+                if is_ignored(nl):
+                    break
+                if re.match(r"\d{2}/\d{2}/\d{4}", nl):
+                    break
+
+                extra_desc.append(nl.strip())
+                j += 1
+
+            full_desc = desc + " " + " ".join(extra_desc)
+            full_desc = re.sub(r"\s+", " ", full_desc).strip()
+
+            tx_list.append({
+                "date": date.replace("/", "-"),
+                "description": full_desc,
+                "ref_no": ref_no,
+                "debit": debit,
+                "credit": credit,
+                "balance": balance_f,
+                "page": page_num,
+                "source_file": source_file
+            })
+
+            i = j
             continue
 
-        # Description
-        desc = ""
-        for x, v in blocks.items():
-            if X_DESC <= x < X_REF and not re.match(r"^\d{2}/\d{2}/\d{4}$", v):
-                desc += v + " "
+        i += 1
 
-        # Ref No
-        refno = ""
-        for x, v in blocks.items():
-            if X_REF <= x < X_WITH and re.match(r"^\d{6,20}$", v):
-                refno = v
-
-        # Determine debit/credit/balance based on column x0
-        debit = 0.0
-        credit = 0.0
-        balance = 0.0
-
-        for x, v in blocks.items():
-            if re.match(r"^[\d,]+\.\d{2}$", v):
-                amt = float(v.replace(",", ""))
-
-                if X_WITH <= x < X_DEPO:
-                    debit = amt
-                elif X_DEPO <= x < X_BAL:
-                    credit = amt
-                elif x >= X_BAL:
-                    balance = amt
-
-        # Skip empty transactions
-        if debit == 0 and credit == 0:
-            continue
-
-        transactions.append({
-            "date": date.replace("/", "-"),
-            "description": desc.strip(),
-            "ref_no": refno,
-            "debit": debit,
-            "credit": credit,
-            "balance": balance,
-            "page": page_num,
-            "source_file": source_file
-        })
-
-    return transactions
+    return tx_list
