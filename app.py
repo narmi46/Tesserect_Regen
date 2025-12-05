@@ -160,24 +160,7 @@ if all_tx:
     cols = ["date", "description", "debit", "credit", "balance", "page", "source_file"]
     df = df[[c for c in cols if c in df.columns]]
 
-    # -----------------------------
-    # SORT BY DATE (OLD → NEW)
-    # -----------------------------
-    # Try multiple common Malaysian bank date formats
-    possible_formats = ["%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"]
-
-    def parse_date(x):
-        for fmt in possible_formats:
-            try:
-                return pd.to_datetime(x, format=fmt)
-            except:
-                continue
-        return pd.NaT  # fallback
-
-    if "date" in df.columns:
-        df["date_sort"] = df["date"].apply(parse_date)
-        df = df.sort_values(by="date_sort", ascending=True)
-        df = df.drop(columns=["date_sort"])
+    # 🚫 Removed date sorting block here
 
     st.dataframe(df, use_container_width=True)
 
