@@ -1,9 +1,7 @@
 import regex as re
 
 # ============================================================
-# RHB STATEMENT PARSER (GLUED-TEXT FORMAT)
-# No opening/closing rows in output.
-# Debit/Credit from balance movement between parsed rows only.
+# Proper token splitting for glued descriptions
 # ============================================================
 
 KNOWN_TOKENS = [
@@ -31,9 +29,9 @@ def split_tokens_glued(text):
         if not matched:
             result.append(s[0])
             s = s[1:]
-    
-    out = []
-    buf = ""
+
+    # merge non-tokens
+    out, buf = [], ""
     for p in result:
         if p in KNOWN_TOKENS:
             if buf:
@@ -59,28 +57,21 @@ def fix_description(desc):
 
 
 # ============================================================
-# BALANCE-BASED DEBIT/CREDIT (INTRA-MONTH ONLY)
+# Debit/Credit calculation
 # ============================================================
 
-def compute_debit_credit(prev_balance, curr_balance):
-    """
-    Determine debit/credit based on movement **between parsed rows only**.
-    First parsed row will have no movement (0, 0).
-    """
-    if prev_balance is None:
-        return 0.0, 0.0  # first parsed row
-
-    if curr_balance < prev_balance:
-        return prev_balance - curr_balance, 0.0  # Debit
-
-    if curr_balance > prev_balance:
-        return 0.0, curr_balance - prev_balance  # Credit
-
+def compute_debit_credit(prev, curr):
+    if prev is None:
+        return 0.0, 0.0
+    if curr < prev:
+        return round(prev - curr, 2), 0.0
+    if curr > prev:
+        return 0.0, round(curr - prev, 2)
     return 0.0, 0.0
 
 
 # ============================================================
-# REGEX
+# Regex for RHB transactions
 # ============================================================
 
 MONTH_MAP = {
@@ -90,84 +81,80 @@ MONTH_MAP = {
     "Oct": "-10-", "Nov": "-11-", "Dec": "-12-"
 }
 
+# matches real transaction rows
 PATTERN_RHB = re.compile(
-    r"^(\d{1,2})([A-Za-z]{3})\s+"       # 07Mar
-    r"(.+?)\s+"                         # description (glued)
-    r"(\d{6,12})\s+"                    # serial
-    r"([0-9,]+\.\d{2})\s+"              # amount1 (ignored)
-    r"([0-9,]+\.\d{2})$"                # amount2 = balance
+    r"^(\d{1,2})([A-Za-z]{3})\s+"
+    r"(.+?)\s+"
+    r"(\d{6,12})\s+"
+    r"([0-9,]+\.\d{2})\s+"
+    r"([0-9,]+\.\d{2})$"
 )
 
+# B/F and C/F detection
+PATTERN_BF_CF = re.compile(r"^\d{1,2}[A-Za-z]{3}\s+(B/F BALANCE|C/F BALANCE)\s+([0-9,]+\.\d{2})$")
+
+
 def parse_line_rhb(line, page_num, year=2024):
+    # Detect B/F and C/F rows (for continuity)
+    bf = PATTERN_BF_CF.match(line)
+    if bf:
+        desc, bal = bf.groups()
+        return {"bf_cf": desc, "balance": float(bal.replace(",", ""))}
+
     m = PATTERN_RHB.match(line)
     if not m:
         return None
 
     day, mon, desc_raw, serial, amt1, amt2 = m.groups()
-
-    month_num = MONTH_MAP.get(mon, "-01-")
-    date_fmt = f"{year}{month_num}{day.zfill(2)}"
+    date_fmt = f"{year}{MONTH_MAP.get(mon, '-01-')}{day.zfill(2)}"
 
     desc_clean = fix_description(desc_raw)
-    balance = float(amt2.replace(",", ""))
 
     return {
         "date": date_fmt,
         "description": desc_clean,
         "serial": serial,
-        "raw_amount": float(amt1.replace(",", "")),  # info only
-        "balance": balance,
-        "page": page_num,
+        "raw_amount": float(amt1.replace(",", "")),
+        "balance": float(amt2.replace(",", "")),
+        "page": page_num
     }
 
 
 # ============================================================
-# PAGE PARSER (NO OPENING/CLOSING ROWS)
+# Page parser with B/F & C/F logic
 # ============================================================
 
-def parse_transactions_rhb(text, page_num, year=2024):
-    """
-    Parses a glued-text page into **only real transactions**:
-    - No B/F BALANCE row
-    - No C/F BALANCE row
-    - First parsed tx will have debit=credit=0 (no previous balance known)
-    """
+def parse_transactions_rhb(text, page_num, prev_end_balance=None, year=2024):
     tx_list = []
-    prev_balance = None
+    prev_balance = prev_end_balance  # from previous page
 
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
+    for raw in text.splitlines():
+        line = raw.strip()
         if not line:
             continue
 
-        tx = parse_line_rhb(line, page_num, year)
-        if not tx:
-            # this also naturally skips B/F BALANCE & C/F BALANCE
+        parsed = parse_line_rhb(line, page_num, year)
+        if not parsed:
             continue
 
-        curr_balance = tx["balance"]
-        debit, credit = compute_debit_credit(prev_balance, curr_balance)
+        # handle B/F BALANCE
+        if "bf_cf" in parsed and parsed["bf_cf"] == "B/F BALANCE":
+            prev_balance = parsed["balance"]
+            continue
 
-        tx["debit"] = debit
-        tx["credit"] = credit
+        # handle C/F BALANCE
+        if "bf_cf" in parsed and parsed["bf_cf"] == "C/F BALANCE":
+            # return this as new end balance
+            return tx_list, parsed["balance"]
 
-        tx_list.append(tx)
-        prev_balance = curr_balance
+        # real transaction
+        curr = parsed["balance"]
+        debit, credit = compute_debit_credit(prev_balance, curr)
 
-    return tx_list
+        parsed["debit"] = debit
+        parsed["credit"] = credit
 
+        tx_list.append(parsed)
+        prev_balance = curr
 
-# ============================================================
-# EXAMPLE
-# ============================================================
-
-sample_text = """
-07May ATMWITHDRAWAL 0000001552 1,500.00 2,004.40
-07May ATMWITHDRAWAL 0000001553 1,500.00 504.40
-07May RPPINWARDINSTTRFCR 0000001943 602.00 1,106.40
-"""
-
-if __name__ == "__main__":
-    parsed = parse_transactions_rhb(sample_text, page_num=1)
-    for p in parsed:
-        print(p)
+    return tx_list, prev_balance
