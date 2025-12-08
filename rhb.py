@@ -1,196 +1,115 @@
 import regex as re
+from datetime import datetime
 
-# ============================================================
-# RHB STATEMENT PARSER — COMBINED VERSION
-# Supports:
-# 1) New no-space format (your Colab logic)
-# 2) Old structured format (regex pattern_rhb)
-# Auto-detects best parser.
-# ============================================================
+def parse_transactions_rhb(text, page_num):
+    """
+    Parses RHB bank statement text, handling formats where spaces 
+    between the date and other fields might be missing (e.g., '07Mar...').
+    """
+    lines = text.splitlines()
+    transactions = []
+    
+    # Default year for date parsing (since the statement date format doesn't always include it)
+    current_year = "2025" 
 
-# ------------------------------
-# OLD REGEX PATTERN PARSER
-# ------------------------------
+    skip_keywords = ['QRPayment', 'FundTransfer', 'pay', 'DuitQRP2PTransfer', 'TotalCount', 'IMPORTANT', 'AZLAN', 'Page']
 
-PATTERN_RHB = re.compile(
-    r"(\d{2}-\d{2}-\d{4})\s+"                       # date
-    r"(\d{3})\s+"                                   # branch
-    r"(.+?)\s+"                                     # description
-    r"([0-9,]+\.\d{2}|-)\s+"                        # debit
-    r"([0-9,]+\.\d{2}|-)\s+"                        # credit
-    r"([0-9,]+\.\d{2})([+-])"                       # balance + sign
-)
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # 1. Match Date Pattern: "07Mar" or "7Mar" followed by text
+        # regex: Start -> 1-2 digits -> 3 letters -> space -> rest
+        date_match = re.match(r'^(\d{1,2})([A-Za-z]{3})\s+(.+)', line)
+        
+        if date_match:
+            day = date_match.group(1)
+            month_str = date_match.group(2)
+            rest = date_match.group(3)
+            
+            # Format Date: DD Mon -> YYYY-MM-DD (Assumes default year)
+            try:
+                date_obj = datetime.strptime(f"{day} {month_str} {current_year}", "%d %b %Y")
+                full_date = date_obj.strftime("%Y-%m-%d")
+            except ValueError:
+                full_date = f"{day} {month_str}" # Fallback
 
-def parse_line_rhb_regex(line, page_num, source_file):
-    m = PATTERN_RHB.search(line)
-    if not m:
-        return None
+            # 2. Parse the rest of the line (Description, Serial, Amount, Balance)
+            parts = rest.split()
+            
+            # Logic: Find the Serial Number (usually 10 digits) to split Description and Amounts
+            serial_idx = -1
+            for idx, part in enumerate(parts):
+                if len(part) == 10 and part.isdigit():
+                    serial_idx = idx
+                    break
+            
+            debit = 0.0
+            credit = 0.0
+            balance = 0.0
+            description_main = ""
 
-    date_raw, branch, desc, dr_raw, cr_raw, balance_raw, sign = m.groups()
-
-    # Convert DD-MM-YYYY → YYYY-MM-DD
-    d, m_, y = date_raw.split("-")
-    full_date = f"{y}-{m_}-{d}"
-
-    debit = float(dr_raw.replace(",", "")) if dr_raw != "-" else 0.0
-    credit = float(cr_raw.replace(",", "")) if cr_raw != "-" else 0.0
-
-    balance = float(balance_raw.replace(",", ""))
-    if sign == "-":
-        balance = -balance
-
-    description = f"{branch} {desc.strip()}"
-
-    return {
-        "date": full_date,
-        "description": description,
-        "serial_no": "",
-        "debit": debit,
-        "credit": credit,
-        "balance": balance,
-        "beneficiary": "",
-        "page": page_num,
-        "source_file": source_file,
-    }
-
-
-def parse_transactions_rhb_regex(text, page_num, source_file):
-    tx_list = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        tx = parse_line_rhb_regex(line, page_num, source_file)
-        if tx:
-            tx_list.append(tx)
-
-    return tx_list
-
-
-# ------------------------------
-# NEW NO-SPACE FORMAT PARSER (from Colab Option A)
-# ------------------------------
-
-DATE_PATTERN = re.compile(r"^(\d{1,2})([A-Za-z]{3})\s+(.*)$")
-
-
-def parse_transactions_rhb_v2(text, page_num, source_file):
-    tx_list = []
-    lines = text.split("\n")
-
-    for i, raw_line in enumerate(lines):
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        m = DATE_PATTERN.match(line)
-        if not m:
-            continue
-
-        day, month, rest = m.groups()
-        date_std = f"{day}-{month}"
-
-        parts = rest.split()
-        if len(parts) < 2:
-            continue
-
-        # Serial no detection
-        serial_no = ""
-        serial_index = -1
-        for idx, token in enumerate(parts):
-            if token.isdigit() and len(token) == 10:
-                serial_no = token
-                serial_index = idx
-                break
-
-        # Opening/closing balances (no serial)
-        if serial_index == -1:
-            desc = " ".join(parts[:-1]).strip()
-            bal = parts[-1].replace(",", "")
-
-            if bal.replace(".", "", 1).isdigit():
-                balance = float(bal)
+            if serial_idx != -1:
+                # Case A: Standard Transaction with Serial No
+                description_main = ' '.join(parts[:serial_idx])
+                balance_str = parts[-1].replace(',', '')
+                
+                # The amount is usually between serial and balance
+                amount_parts = parts[serial_idx + 1:-1]
+                if amount_parts:
+                    amount_val = float(amount_parts[0].replace(',', ''))
+                    
+                    # Determine Dr/Cr based on keywords
+                    if 'CR' in description_main or 'DEPOSIT' in description_main.upper():
+                        credit = amount_val
+                    else:
+                        debit = amount_val
+                        
+                balance = float(balance_str) if balance_str else 0.0
+                
             else:
-                balance = 0.0
+                # Case B: No Serial (e.g., Opening Balance, simple transfers)
+                # Assume last item is balance
+                if len(parts) > 1:
+                    balance_str = parts[-1].replace(',', '')
+                    description_main = ' '.join(parts[:-1])
+                    try:
+                        balance = float(balance_str)
+                    except:
+                        balance = 0.0
 
-            tx_list.append({
-                "date": date_std,
-                "description": desc,
-                "serial_no": "",
-                "debit": 0.0,
-                "credit": 0.0,
+            # 3. Capture Beneficiary / Extra Details from subsequent lines
+            beneficiary_lines = []
+            j = i + 1
+            while j < min(i + 5, len(lines)):
+                next_line = lines[j].strip()
+                
+                # Stop if next line is a new date
+                if re.match(r'^\d{1,2}[A-Za-z]{3}\s+', next_line):
+                    break
+                
+                # Stop if empty or technical header
+                if not next_line or any(k in next_line for k in skip_keywords) or re.match(r'^[A-Z0-9]{15,}$', next_line):
+                    j += 1
+                    continue
+
+                beneficiary_lines.append(next_line)
+                j += 1
+            
+            # Merge beneficiary info into description for the final output
+            full_description = description_main
+            if beneficiary_lines:
+                full_description += " | " + " ".join(beneficiary_lines[:2])
+
+            transactions.append({
+                "date": full_date,
+                "description": full_description,
+                "debit": debit,
+                "credit": credit,
                 "balance": balance,
-                "beneficiary": "",
-                "page": page_num,
-                "source_file": source_file
+                "page": page_num
             })
-            continue
 
-        # Description
-        description = " ".join(parts[:serial_index]).strip()
+        i += 1
 
-        # Amount + balance
-        bal = parts[-1].replace(",", "")
-        amount_part = parts[serial_index + 1:-1]
-
-        debit = credit = 0.0
-        if amount_part:
-            amt = amount_part[0].replace(",", "")
-            if "CR" in description.upper() or "DEPOSIT" in description.upper():
-                credit = float(amt)
-            else:
-                debit = float(amt)
-
-        balance = float(bal) if bal.replace(".", "", 1).isdigit() else 0.0
-
-        # beneficiary lines (2 lines max)
-        bene_lines = []
-        for j in range(i + 1, min(i + 6, len(lines))):
-            nxt = lines[j].strip()
-            if not nxt:
-                break
-            if DATE_PATTERN.match(nxt):
-                break
-            if re.match(r"^[A-Z0-9]{12,}$", nxt):
-                continue
-            if nxt in ("QRPayment", "FundTransfer", "DuitQRP2PTransfer", "pay"):
-                continue
-            bene_lines.append(nxt)
-
-        beneficiary = " | ".join(bene_lines[:2])
-
-        tx_list.append({
-            "date": date_std,
-            "description": description,
-            "serial_no": serial_no,
-            "debit": debit,
-            "credit": credit,
-            "balance": balance,
-            "beneficiary": beneficiary,
-            "page": page_num,
-            "source_file": source_file
-        })
-
-    return tx_list
-
-
-# ------------------------------
-# MASTER DISPATCHER
-# ------------------------------
-
-def parse_transactions_rhb(text, page_num, source_file="RHB Statement"):
-    """
-    Main public function.
-    Tries new 'no-space' parser first.
-    If 0 results → falls back to old regex parser.
-    """
-
-    # Try new parser first
-    tx_v2 = parse_transactions_rhb_v2(text, page_num, source_file)
-    if tx_v2:
-        return tx_v2
-
-    # Otherwise fallback
-    tx_regex = parse_transactions_rhb_regex(text, page_num, source_file)
-    return tx_regex
+    return transactions
