@@ -2,8 +2,8 @@ import regex as re
 
 # ============================================================
 # RHB STATEMENT PARSER (GLUED-TEXT FORMAT)
-# Uses BALANCE CHANGE to determine DEBIT / CREDIT accurately.
-# Supports explicit opening_balance so first tx is correct.
+# No opening/closing rows in output.
+# Debit/Credit from balance movement between parsed rows only.
 # ============================================================
 
 KNOWN_TOKENS = [
@@ -59,16 +59,16 @@ def fix_description(desc):
 
 
 # ============================================================
-# BALANCE-BASED DEBIT/CREDIT
+# BALANCE-BASED DEBIT/CREDIT (INTRA-MONTH ONLY)
 # ============================================================
 
 def compute_debit_credit(prev_balance, curr_balance):
     """
-    Determines debit/credit based solely on balance movement.
+    Determine debit/credit based on movement **between parsed rows only**.
+    First parsed row will have no movement (0, 0).
     """
     if prev_balance is None:
-        # No previous balance -> treat as opening line (no movement)
-        return 0.0, 0.0
+        return 0.0, 0.0  # first parsed row
 
     if curr_balance < prev_balance:
         return prev_balance - curr_balance, 0.0  # Debit
@@ -76,7 +76,7 @@ def compute_debit_credit(prev_balance, curr_balance):
     if curr_balance > prev_balance:
         return 0.0, curr_balance - prev_balance  # Credit
 
-    return 0.0, 0.0  # No movement
+    return 0.0, 0.0
 
 
 # ============================================================
@@ -115,38 +115,25 @@ def parse_line_rhb(line, page_num, year=2024):
         "date": date_fmt,
         "description": desc_clean,
         "serial": serial,
-        "raw_amount": float(amt1.replace(",", "")),  # FYI only
+        "raw_amount": float(amt1.replace(",", "")),  # info only
         "balance": balance,
         "page": page_num,
     }
 
 
 # ============================================================
-# FULL PARSER (NOW SUPPORTS opening_balance)
+# PAGE PARSER (NO OPENING/CLOSING ROWS)
 # ============================================================
 
-def parse_transactions_rhb(
-    text,
-    page_num,
-    year=2024,
-    opening_balance=None,
-    reset_balance_on_page=False
-):
+def parse_transactions_rhb(text, page_num, year=2024):
     """
-    Parse a page of glued text.
-
-    opening_balance:
-        - If provided, it's used as the previous balance for the FIRST tx.
-        - If None, the first parsed transaction is treated as opening (no movement).
-
-    reset_balance_on_page:
-        - If True, prev_balance is reset to opening_balance at the start of each page.
+    Parses a glued-text page into **only real transactions**:
+    - No B/F BALANCE row
+    - No C/F BALANCE row
+    - First parsed tx will have debit=credit=0 (no previous balance known)
     """
     tx_list = []
-
-    # This is the key bug fix:
-    # Start prev_balance from the REAL opening balance if you know it.
-    prev_balance = opening_balance
+    prev_balance = None
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -155,16 +142,12 @@ def parse_transactions_rhb(
 
         tx = parse_line_rhb(line, page_num, year)
         if not tx:
+            # this also naturally skips B/F BALANCE & C/F BALANCE
             continue
 
         curr_balance = tx["balance"]
-
-        # Optional: if you want each page to start fresh
-        if reset_balance_on_page and prev_balance is None and opening_balance is not None:
-            prev_balance = opening_balance
-
-        # Compute debit/credit from balance movement
         debit, credit = compute_debit_credit(prev_balance, curr_balance)
+
         tx["debit"] = debit
         tx["credit"] = credit
 
@@ -179,15 +162,12 @@ def parse_transactions_rhb(
 # ============================================================
 
 sample_text = """
-07Mar CDTCASHDEPOSIT 0000004470 1,000.00 1,000.00
-08Mar ANNUALFEES 0000004960 12.00 988.00
-09Mar DUITNOWQRP2PCRRHBQR000000 0000007440 540.00 1,528.00
-09Mar RPPINWARDINSTTRFCR 0000001310 1,280.00 2,808.00
-09Mar MBKINSTANTTRFDRKVTJEWELLERSSDN.B 0000000926 2,800.00 8.00
+07May ATMWITHDRAWAL 0000001552 1,500.00 2,004.40
+07May ATMWITHDRAWAL 0000001553 1,500.00 504.40
+07May RPPINWARDINSTTRFCR 0000001943 602.00 1,106.40
 """
 
 if __name__ == "__main__":
-    # Example where opening balance is 0.00 (like March statement)
-    parsed = parse_transactions_rhb(sample_text, page_num=1, opening_balance=0.0)
+    parsed = parse_transactions_rhb(sample_text, page_num=1)
     for p in parsed:
         print(p)
