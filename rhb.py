@@ -12,7 +12,8 @@ KNOWN_TOKENS = [
     "DUITNOW", "QR", "P2P", "CR", "DR",
     "RPP", "INWARD", "INST", "TRF",
     "MBK", "INSTANT",
-    "MYDEBIT", "FUND", "MB", "ATM"
+    "MYDEBIT", "FUND", "MB", "ATM",
+    "WITHDRAWAL", "PAYMENT", "TRANSFER"
 ]
 
 def split_tokens_glued(text):
@@ -32,7 +33,7 @@ def split_tokens_glued(text):
                 break
         if not matched:
             result.append(s[0])
-            s = s[0+1:]
+            s = s[1:]
     
     out = []
     buf = ""
@@ -73,42 +74,49 @@ def compute_debit_credit(prev_balance, curr_balance):
     Determines debit/credit based solely on balance movement.
     """
     if prev_balance is None:
-        return 0.0, 0.0  # First B/F row
-
+        return 0.0, 0.0  # First row (B/F)
+    
     if curr_balance < prev_balance:
         return prev_balance - curr_balance, 0.0  # Debit
 
     if curr_balance > prev_balance:
         return 0.0, curr_balance - prev_balance  # Credit
 
-    return 0.0, 0.0  # No change
+    return 0.0, 0.0  # No movement
 
 
 # ============================================================
 # REGEX TO MATCH GLUED RHB TRANSACTION LINES
 # ============================================================
 
+MONTH_MAP = {
+    "Jan": "-01-", "Feb": "-02-", "Mar": "-03-",
+    "Apr": "-04-", "May": "-05-", "Jun": "-06-",
+    "Jul": "-07-", "Aug": "-08-", "Sep": "-09-",
+    "Oct": "-10-", "Nov": "-11-", "Dec": "-12-"
+}
+
 PATTERN_RHB = re.compile(
-    r"^(\d{1,2})([A-Za-z]{3})\s+"         # e.g. 07Mar
-    r"(.+?)\s+"                           # description (glued)
-    r"(\d{6,12})\s+"                       # serial no.
-    r"([0-9,]+\.\d{2})\s+"                 # amount 1 (ignored for debit/credit)
-    r"([0-9,]+\.\d{2})$"                   # amount 2 = balance
+    r"^(\d{1,2})([A-Za-z]{3})\s+"       # e.g. 07Mar
+    r"(.+?)\s+"                         # description (glued)
+    r"(\d{6,12})\s+"                    # serial no.
+    r"([0-9,]+\.\d{2})\s+"              # amount1 (ignored)
+    r"([0-9,]+\.\d{2})$"                # amount2 = balance
 )
 
 
 def parse_line_rhb(line, page_num, year=2024):
     """
     Parses ONE glued RHB line and returns intermediate data.
-    Final debit/credit will be computed after reading balance.
     """
     m = PATTERN_RHB.match(line)
     if not m:
         return None
 
-    day, month, desc_raw, serial, amt1, amt2 = m.groups()
+    day, mon, desc_raw, serial, amt1, amt2 = m.groups()
 
-    date_fmt = f"{year}-{month}-{day}"
+    month_num = MONTH_MAP.get(mon, "-01-")
+    date_fmt = f"{year}{month_num}{day.zfill(2)}"
 
     desc_clean = fix_description(desc_raw)
 
@@ -125,10 +133,14 @@ def parse_line_rhb(line, page_num, year=2024):
 
 
 # ============================================================
-# FULL TRANSACTION PARSER FOR A PAGE OR MULTIPLE PAGES
+# FULL PAGE / MULTIPAGE TRANSACTION PARSER
 # ============================================================
 
-def parse_transactions_rhb(text, page_num, year=2024):
+def parse_transactions_rhb(text, page_num, year=2024, reset_balance_on_page=False):
+    """
+    Parses a page of glued text.
+    OPTIONAL: reset_balance_on_page=True if each page starts fresh.
+    """
     tx_list = []
     prev_balance = None
 
@@ -138,19 +150,27 @@ def parse_transactions_rhb(text, page_num, year=2024):
             continue
 
         tx = parse_line_rhb(line, page_num, year)
-        if tx:
-            curr_balance = tx["balance"]
+        if not tx:
+            continue
+        
+        curr_balance = tx["balance"]
 
-            # Compute debit/credit **correctly**
-            debit, credit = compute_debit_credit(prev_balance, curr_balance)
-
-            # Replace raw amount logic with correct balance-change logic
-            tx["debit"] = debit
-            tx["credit"] = credit
-
+        # If resetting per page:
+        if reset_balance_on_page and prev_balance is None:
+            tx["debit"] = 0.0
+            tx["credit"] = 0.0
             tx_list.append(tx)
+            prev_balance = curr_balance
+            continue
 
-            prev_balance = curr_balance  # Update for next row
+        # Compute debit/credit by balance movement
+        debit, credit = compute_debit_credit(prev_balance, curr_balance)
+        tx["debit"] = debit
+        tx["credit"] = credit
+
+        tx_list.append(tx)
+
+        prev_balance = curr_balance
 
     return tx_list
 
