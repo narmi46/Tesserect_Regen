@@ -9,8 +9,8 @@ def clean_amount(value):
 
 def parse_bank_islam(pdf):
     """
-    Parses Bank Islam statement using pdfplumber table extraction.
-    Much more accurate than text regex.
+    Parses Bank Islam statements using pdfplumber table extraction.
+    Returns a list of transaction dicts.
     """
     transactions = []
 
@@ -20,26 +20,12 @@ def parse_bank_islam(pdf):
         if not tables:
             continue
 
-        # Bank Islam tables usually contain headers like:
-        # "Transaction Date", "Customer/EFT No", "Transaction Code", ...
         for table in tables:
-            # Skip header row, find the actual data rows
+            # Skip malformed tables
             if not table or len(table) < 2:
                 continue
 
-            header = table[0]
-
-            # Expected useful columns by index:
-            # [0]=No.
-            # [1]=Transaction Date
-            # [2]=Customer/EFT No
-            # [3]=Transaction Code
-            # [4]=Description
-            # [5]=Ref/Cheque No
-            # [6]=Servicing Branch
-            # [7]=Debit Amount
-            # [8]=Credit Amount
-            # [9]=Balance
+            header = table[0]  # We skip header row
 
             for row in table[1:]:
                 if len(row) < 10:
@@ -58,22 +44,21 @@ def parse_bank_islam(pdf):
                     balance_raw
                 ) = row[:10]
 
-                # Skip totals row
-                if "Total" in str(no):
+                if not date_raw or "Total" in str(no):
                     continue
 
-                # Clean values
-                description = " ".join(str(desc).split())
-                debit = clean_amount(debit_raw)
-                credit = clean_amount(credit_raw)
-                balance = clean_amount(balance_raw)
-
-                # Normalize date: 13/03/2025 → 2025-03-13
-                if date_raw and re.match(r"\d{2}/\d{2}/\d{4}", date_raw):
+                # Normalize date format
+                if re.match(r"\d{2}/\d{2}/\d{4}", date_raw):
                     dd, mm, yyyy = date_raw.split("/")
                     date_fmt = f"{yyyy}-{mm}-{dd}"
                 else:
                     date_fmt = date_raw
+
+                description = " ".join(str(desc).split())
+
+                debit = clean_amount(debit_raw)
+                credit = clean_amount(credit_raw)
+                balance = clean_amount(balance_raw)
 
                 transactions.append({
                     "date": date_fmt,
