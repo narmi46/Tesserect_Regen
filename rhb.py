@@ -1,98 +1,46 @@
-# rhb.py (fixed for app.py compatibility)
 import regex as re
 
-# ============================================================
-# INTERNAL STATE (PERSISTS ACROSS PAGES)
-# ============================================================
-
-# This persists between calls from app.py
 _prev_balance_global = None
 
 
-# ============================================================
-# TOKEN SPLITTING
-# ============================================================
-
-KNOWN_TOKENS = [
-    "CDT", "CASH", "DEPOSIT",
-    "ANNUAL", "FEES",
-    "DUITNOW", "QR", "P2P", "CR", "DR",
-    "RPP", "INWARD", "INST", "TRF",
-    "MBK", "INSTANT",
-    "MYDEBIT", "FUND", "MB", "ATM",
-    "WITHDRAWAL", "PAYMENT", "TRANSFER"
-]
-
-def split_tokens_glued(text):
-    s = text
-    result = []
-
-    while s:
-        matched = False
-        for tok in sorted(KNOWN_TOKENS, key=len, reverse=True):
-            if s.startswith(tok):
-                result.append(tok)
-                s = s[len(tok) :]
-                matched = True
-                break
-        if not matched:
-            result.append(s[0])
-            s = s[1:]
-
-    out, buf = [], ""
-    for p in result:
-        if p in KNOWN_TOKENS:
-            if buf:
-                out.append(buf)
-                buf = ""
-            out.append(p)
-        else:
-            buf += p
-    if buf:
-        out.append(buf)
-
-    return " ".join(out)
-
-
+# ================================
+# SIMPLE DESCRIPTION CLEANER
+# ================================
 def fix_description(desc):
     if not desc:
         return desc
 
-    desc = split_tokens_glued(desc)
-    desc = re.sub(r"([A-Za-z])(\d)", r"\1 \2", desc)
-    desc = re.sub(r"(\d)([A-Za-z])", r"\1 \2", desc)
-
-    return " ".join(desc.split())
+    # Remove multiple spaces
+    desc = " ".join(desc.split())
+    return desc
 
 
-# ============================================================
-# BALANCE → DEBIT / CREDIT LOGIC
-# ============================================================
-
+# ================================
+# BALANCE TO DEBIT/CREDIT
+# ================================
 def compute_debit_credit(prev_balance, curr_balance):
     if prev_balance is None:
         return 0.0, 0.0
 
-    if curr_balance < prev_balance:
-        return round(prev_balance - curr_balance, 2), 0.0
+    diff = round(curr_balance - prev_balance, 2)
 
-    if curr_balance > prev_balance:
-        return 0.0, round(curr_balance - prev_balance, 2)
-
+    if diff > 0:
+        return 0.0, diff  # credit
+    elif diff < 0:
+        return abs(diff), 0.0  # debit
     return 0.0, 0.0
 
 
-# ============================================================
-# REGEX PATTERNS
-# ============================================================
-
+# ================================
+# REGEX
+# ================================
 MONTH_MAP = {
-    "Jan": "-01-", "Feb": "-02-", "Mar": "-03-",
-    "Apr": "-04-", "May": "-05-", "Jun": "-06-",
-    "Jul": "-07-", "Aug": "-08-", "Sep": "-09-",
-    "Oct": "-10-", "Nov": "-11-", "Dec": "-12-"
+    "Jan": "-01-", "Feb": "-02-", "Mar": "-03-", "Apr": "-04-",
+    "May": "-05-", "Jun": "-06-", "Jul": "-07-", "Aug": "-08-",
+    "Sep": "-09-", "Oct": "-10-", "Nov": "-11-", "Dec": "-12-"
 }
 
+# FIRST LINE ONLY (what you want)
 PATTERN_TX = re.compile(
     r"^(\d{1,2})([A-Za-z]{3})\s+"
     r"(.+?)\s+"
@@ -106,16 +54,15 @@ PATTERN_BF_CF = re.compile(
 )
 
 
-# ============================================================
-# LINE PARSER
-# ============================================================
-
+# ================================
+# MAIN PARSER
+# ================================
 def parse_line_rhb(line, page_num, year=2025):
     line = line.strip()
     if not line:
         return None
 
-    # B/F + C/F first
+    # B/F or C/F detected
     m_bf = PATTERN_BF_CF.match(line)
     if m_bf:
         day, mon, kind, bal = m_bf.groups()
@@ -128,7 +75,7 @@ def parse_line_rhb(line, page_num, year=2025):
             "page": page_num,
         }
 
-    # Then normal TX
+    # NORMAL TX (ONLY FIRST LINE)
     m = PATTERN_TX.match(line)
     if not m:
         return None
@@ -136,30 +83,18 @@ def parse_line_rhb(line, page_num, year=2025):
     day, mon, desc_raw, serial, amt1, amt2 = m.groups()
     date_fmt = f"{year}{MONTH_MAP.get(mon,'-01-')}{day.zfill(2)}"
 
-    desc_clean = fix_description(desc_raw)
-
     return {
         "type": "tx",
         "date": date_fmt,
-        "description": desc_clean,
+        "description": fix_description(desc_raw),
         "serial": serial,
-        "raw_amount": float(amt1.replace(",", "")),
+        "amount_raw": float(amt1.replace(",", "")),
         "balance": float(amt2.replace(",", "")),
         "page": page_num,
     }
 
 
-# ============================================================
-# MAIN: parse_transactions_rhb() — MUST RETURN ONLY A LIST
-# ============================================================
-
 def parse_transactions_rhb(text, page_num, year=2025):
-    """
-    REQUIRED BY YOUR APP:
-    - Accept (text, page_num)
-    - Return LIST ONLY
-    - Maintain balance continuity internally
-    """
     global _prev_balance_global
 
     tx_list = []
@@ -169,39 +104,24 @@ def parse_transactions_rhb(text, page_num, year=2025):
         if not parsed:
             continue
 
-        # -----------------------
-        # Handle B/F & C/F rows
-        # -----------------------
+        # Skip B/F and C/F in final output
         if parsed["type"] == "bf_cf":
-            # If B/F → this page's starting balance
-            if parsed["kind"] == "B/F BALANCE":
-                _prev_balance_global = parsed["balance"]
-
-            # If C/F → update closing balance but DO NOT emit row
-            elif parsed["kind"] == "C/F BALANCE":
-                _prev_balance_global = parsed["balance"]
-
+            _prev_balance_global = parsed["balance"]
             continue
 
-        # ---------------------------------
-        # Normal transaction
-        # ---------------------------------
-
+        # Normal TX
         curr_balance = parsed["balance"]
         debit, credit = compute_debit_credit(_prev_balance_global, curr_balance)
 
-        tx = {
+        tx_list.append({
             "date": parsed["date"],
-            "description": parsed["description"],
+            "description": parsed["description"],   # FIRST LINE ONLY
             "debit": debit,
             "credit": credit,
-            "balance": round(curr_balance, 2),
+            "balance": curr_balance,
             "page": page_num,
-        }
+        })
 
-        tx_list.append(tx)
-
-        # Update continuity
         _prev_balance_global = curr_balance
 
-    return tx_list  # ✔ app.py expects ONLY a list
+    return tx_list
