@@ -29,6 +29,24 @@ if "results" not in st.session_state:
 
 
 # ---------------------------------------------------
+# ASCII TABLE EXPORT FUNCTION
+# ---------------------------------------------------
+def dataframe_to_ascii(df):
+    df_str = df.astype(str)
+    col_widths = {col: max(df_str[col].map(len).max(), len(col)) for col in df_str.columns}
+
+    separator = "+" + "+".join("-" * (col_widths[col] + 2) for col in df_str.columns) + "+"
+    header = "|" + "|".join(f" {col.ljust(col_widths[col])} " for col in df_str.columns) + "|"
+
+    rows = [
+        "|" + "|".join(f" {str(val).ljust(col_widths[col])} " for col, val in row.items()) + "|"
+        for _, row in df_str.iterrows()
+    ]
+
+    return "\n".join([separator, header, separator] + rows + [separator])
+
+
+# ---------------------------------------------------
 # Bank Selection Dropdown
 # ---------------------------------------------------
 bank_choice = st.selectbox(
@@ -55,7 +73,7 @@ default_year = st.text_input("Default Year", "2025")
 
 
 # ---------------------------------------------------
-# Auto-Detect Preview (Before Start Processing)
+# Auto-Detect Preview BEFORE Start Processing
 # ---------------------------------------------------
 if uploaded_files and bank_hint is None:
     st.subheader("🔍 Auto-Detect Preview (Before Processing)")
@@ -68,7 +86,6 @@ if uploaded_files and bank_hint is None:
 
                 detected_bank = "Unknown"
 
-                # SIMPLE detection — matching logos/text
                 if "CIMB" in text.upper():
                     detected_bank = "CIMB Bank"
                 elif "MAYBANK" in text.upper():
@@ -101,35 +118,31 @@ with col3:
     if st.button("🔄 Reset"):
         st.session_state.status = "idle"
         st.session_state.results = []
-        st.experimental_rerun()
+        st.rerun()
 
 st.write(f"### ⚙️ Status: **{st.session_state.status.upper()}**")
 
 
 # ---------------------------------------------------
-# Auto-Detect Parsing Function
+# Auto-detect Parsing Function
 # ---------------------------------------------------
 def auto_detect_and_parse(text, page_obj, page_num, default_year="2025", **source_file_kwargs):
 
     source_file = source_file_kwargs.get("source_file", "AutoDetect")
 
-    # CIMB
     if "CIMB" in text.upper():
         tx = parse_transactions_cimb(page_obj, page_num, source_file)
         if tx:
             return tx, "CIMB Bank"
 
-    # Maybank
     tx = parse_transactions_maybank(text, page_num, default_year)
     if tx:
         return tx, "Maybank"
 
-    # Public Bank
     tx = parse_transactions_pbb(text, page_num, default_year)
     if tx:
         return tx, "Public Bank (PBB)"
 
-    # RHB
     tx = parse_transactions_rhb(text, page_num)
     if tx:
         return tx, "RHB Bank"
@@ -144,7 +157,7 @@ all_tx = []
 
 if uploaded_files and st.session_state.status == "running":
 
-    bank_display_box = st.empty()  # live status
+    bank_display_box = st.empty()
 
     for uploaded_file in uploaded_files:
 
@@ -165,7 +178,6 @@ if uploaded_files and st.session_state.status == "running":
 
                     bank_display_box.info(f"🔍 Detecting bank for Page {page_num}...")
 
-                    # DIRECT PARSING if bank selected
                     if bank_hint == "maybank":
                         detected_bank = "Maybank"
                         tx = parse_transactions_maybank(text, page_num, default_year)
@@ -182,7 +194,6 @@ if uploaded_files and st.session_state.status == "running":
                         detected_bank = "CIMB Bank"
                         tx = parse_transactions_cimb(page, page_num, uploaded_file.name)
 
-                    # AUTO-DETECT MODE
                     else:
                         tx, detected_bank = auto_detect_and_parse(
                             text=text,
@@ -224,6 +235,14 @@ if st.session_state.results:
     json_data = json.dumps(df.to_dict(orient="records"), indent=4)
     st.download_button("⬇️ Download JSON", json_data, file_name="transactions.json", mime="application/json")
 
+    # TXT Export
+    ascii_txt = dataframe_to_ascii(df)
+    st.download_button(
+        "⬇️ Download TXT (ASCII Table)",
+        ascii_txt,
+        file_name="transactions.txt",
+        mime="text/plain"
+    )
 
 else:
     if uploaded_files:
