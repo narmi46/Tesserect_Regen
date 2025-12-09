@@ -1,81 +1,86 @@
-import regex as re
+# bank_islam.py
+import re
 
-def parse_bank_islam_line(line):
+def clean_amount(value):
+    if not value or value == "-":
+        return 0.0
+    return float(value.replace(",", ""))
+
+
+def parse_bank_islam(pdf):
     """
-    Parse one transaction line from Bank Islam PDF.
-    Expected Example:
-    13/03/2025 16:00:26 INV/2501/2 177 1590 IBG TRANSFER TO CA 801 9999947 801 4,200.00 59,342.10
+    Parses Bank Islam statement using pdfplumber table extraction.
+    Much more accurate than text regex.
     """
+    transactions = []
 
-    line = line.strip()
-    if not line:
-        return None
+    for page in pdf.pages:
+        tables = page.extract_tables()
 
-    # Main regex pattern for Bank Islam
-    PATTERN_BI = re.compile(
-        r"(\d{2}/\d{2}/\d{4})\s+"         # Date
-        r"(\d{2}:\d{2}:\d{2})\s+"         # Time
-        r"(\S+)\s+"                       # Customer/EFT No (ignored)
-        r"(\d{3,4})\s+"                   # Transaction Code
-        r"(.+?)\s+"                       # Description (lazy)
-        r"(\d+)\s+(\d+)\s+(\d+)\s+"       # Branch / Ref / Branch (ignored)
-        r"([0-9,]+\.\d{2}|-)\s+"          # Debit
-        r"([0-9,]+\.\d{2}|-)"             # Balance OR Credit depending on position
-    )
+        if not tables:
+            continue
 
-    match = PATTERN_BI.search(line)
-    if not match:
-        return None
+        # Bank Islam tables usually contain headers like:
+        # "Transaction Date", "Customer/EFT No", "Transaction Code", ...
+        for table in tables:
+            # Skip header row, find the actual data rows
+            if not table or len(table) < 2:
+                continue
 
-    (
-        date_raw, time_raw, customer_ref, code,
-        desc, br1, br2, br3, amount_raw, balance_raw
-    ) = match.groups()
+            header = table[0]
 
-    # Convert date to YYYY-MM-DD
-    dd, mm, yyyy = date_raw.split("/")
-    date_fmt = f"{yyyy}-{mm}-{dd}"
+            # Expected useful columns by index:
+            # [0]=No.
+            # [1]=Transaction Date
+            # [2]=Customer/EFT No
+            # [3]=Transaction Code
+            # [4]=Description
+            # [5]=Ref/Cheque No
+            # [6]=Servicing Branch
+            # [7]=Debit Amount
+            # [8]=Credit Amount
+            # [9]=Balance
 
-    # Debit or Credit?
-    amount = amount_raw.replace(",", "")
-    amount_val = float(amount) if amount != "-" else 0.0
+            for row in table[1:]:
+                if len(row) < 10:
+                    continue
 
-    # Determine credit or debit from code
-    # IBG TRANSFER TO CA → credit normally
-    desc_u = desc.upper()
+                (
+                    no,
+                    date_raw,
+                    eft_no,
+                    code,
+                    desc,
+                    ref_no,
+                    branch,
+                    debit_raw,
+                    credit_raw,
+                    balance_raw
+                ) = row[:10]
 
-    if "TRANSFER" in desc_u and "TO CA" in desc_u:
-        debit = 0.0
-        credit = amount_val
-    elif "PROFIT PAID" in desc_u:
-        debit = 0.0
-        credit = amount_val
-    else:
-        # Service charge, DD CASA - DR, CMS SERVICE CHARGE → debit
-        debit = amount_val
-        credit = 0.0
+                # Skip totals row
+                if "Total" in str(no):
+                    continue
 
-    # Balance
-    balance = float(balance_raw.replace(",", "")) if balance_raw != "-" else 0.0
+                # Clean values
+                description = " ".join(str(desc).split())
+                debit = clean_amount(debit_raw)
+                credit = clean_amount(credit_raw)
+                balance = clean_amount(balance_raw)
 
-    return {
-        "date": date_fmt,
-        "description": desc.strip(),
-        "debit": debit,
-        "credit": credit,
-        "balance": balance,
-    }
+                # Normalize date: 13/03/2025 → 2025-03-13
+                if date_raw and re.match(r"\d{2}/\d{2}/\d{4}", date_raw):
+                    dd, mm, yyyy = date_raw.split("/")
+                    date_fmt = f"{yyyy}-{mm}-{dd}"
+                else:
+                    date_fmt = date_raw
 
+                transactions.append({
+                    "date": date_fmt,
+                    "description": description,
+                    "debit": debit,
+                    "credit": credit,
+                    "balance": balance,
+                })
 
-def parse_bank_islam(text):
-    """
-    Parses the entire Bank Islam statement text.
-    """
-    tx_list = []
-
-    for line in text.splitlines():
-        tx = parse_bank_islam_line(line)
-        if tx:
-            tx_list.append(tx)
-
-    return tx_list
+    return transactions
