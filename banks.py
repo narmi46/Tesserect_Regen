@@ -53,7 +53,7 @@ def parse_page_by_bank(text, page_obj, page_num, bank_hint, default_year, source
         return parse_transactions_cimb(page_obj, page_num, source_file), "CIMB Bank"
 
     if bank_hint == "bank_islam":
-        return parse_bank_islam(text), "Bank Islam"
+        return parse_bank_islam(pdf_obj), "Bank Islam"
 
     # -------------------------------
     # 2. AUTO-DETECT MODE
@@ -73,7 +73,8 @@ def parse_page_by_bank(text, page_obj, page_num, bank_hint, default_year, source
         return parse_transactions_rhb(text, page_num), "RHB Bank"
 
     if detected == "bank_islam":
-        return parse_bank_islam(text), "Bank Islam"
+        return parse_bank_islam(pdf_obj), "Bank Islam"
+
 
     # Unknown bank
     return [], "Unknown"
