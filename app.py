@@ -10,7 +10,7 @@ from exporter import dataframe_to_ascii, dataframe_to_json
 # Streamlit Setup
 # -------------------------------
 st.set_page_config(page_title="Bank Parser", layout="wide")
-st.title("📄 Bank Statement Parser (Multi-Bank Support)")
+st.title("📄 Bank Statement Parser (Multi-Bank)")
 
 
 # -------------------------------
@@ -42,26 +42,25 @@ bank_map = {
     "Bank Islam": "bank_islam"
 }
 
-bank_hint = bank_map.get(bank_choice)  # None = Auto-detect
+bank_hint = bank_map.get(bank_choice)  # Auto-detect = None
 
 
 # -------------------------------
 # File Upload
 # -------------------------------
 uploaded_files = st.file_uploader(
-    "Upload PDF files",
-    type=["pdf"],
-    accept_multiple_files=True
+    "Upload PDF files", type=["pdf"], accept_multiple_files=True
 )
 
 default_year = st.text_input("Default Year", "2025")
 
 
 # -------------------------------
-# Auto-Detect Preview (Before Start)
+# Auto-detect Preview
 # -------------------------------
 if uploaded_files and bank_hint is None:
-    st.subheader("🔍 Auto-Detect Preview")
+    st.subheader("🔍 Auto-detect Preview")
+
     for f in uploaded_files:
         try:
             with pdfplumber.open(f) as pdf:
@@ -102,7 +101,6 @@ with col3:
         st.session_state.status = "idle"
         st.rerun()
 
-
 st.write(f"### Status: **{st.session_state.status.upper()}**")
 
 
@@ -121,21 +119,20 @@ if uploaded_files and st.session_state.status == "running":
             for page_num, page in enumerate(pdf.pages, start=1):
 
                 if st.session_state.status == "stopped":
-                    st.warning("Processing stopped by user.")
+                    st.warning("Stopped by user.")
                     break
 
                 text = page.extract_text() or ""
 
                 tx, bank_used = parse_page_by_bank(
-                        text=text,
-                        page_obj=page,
-                        page_num=page_num,
-                        pdf_obj=pdf,          # <-- NEW
-                        bank_hint=bank_hint,
-                        default_year=default_year,
-                        source_file=f.name
-                    )
-
+                    text=text,
+                    page_obj=page,
+                    page_num=page_num,
+                    pdf_obj=pdf,        # <-- IMPORTANT
+                    bank_hint=bank_hint,
+                    default_year=default_year,
+                    source_file=f.name
+                )
 
                 live_status.info(f"🏦 Processing: {bank_used} (Page {page_num})")
 
@@ -149,22 +146,22 @@ if uploaded_files and st.session_state.status == "running":
 
 
 # -------------------------------
-# DISPLAY RESULTS & EXPORT
+# DISPLAY RESULTS
 # -------------------------------
 if st.session_state.results:
     st.subheader("📊 Extracted Transactions")
-    df = pd.DataFrame(st.session_state.results)
 
+    df = pd.DataFrame(st.session_state.results)
     st.dataframe(df, use_container_width=True)
 
     # JSON export
-    json_export = dataframe_to_json(df)
-    st.download_button("⬇ Download JSON", json_export, "transactions.json")
+    json_data = dataframe_to_json(df)
+    st.download_button("⬇ Download JSON", json_data, "transactions.json")
 
     # TXT export
-    txt_export = dataframe_to_ascii(df)
-    st.download_button("⬇ Download TXT", txt_export, "transactions.txt")
+    ascii_data = dataframe_to_ascii(df)
+    st.download_button("⬇ Download TXT", ascii_data, "transactions.txt")
 
 else:
     if uploaded_files:
-        st.warning("No transactions found — press START to begin.")
+        st.warning("No transactions yet — press START.")
