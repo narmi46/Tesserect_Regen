@@ -8,38 +8,40 @@ from bank_islam import parse_bank_islam
 
 
 def detect_bank_by_text(text: str):
-    """
-    Lightweight bank detection for preview + auto-detect mode.
-    """
+    """Auto-detect bank by scanning PDF text."""
     t = text.upper()
 
     if "CIMB" in t:
         return "cimb"
-
     if "MAYBANK" in t or "MBB" in t:
         return "maybank"
-
     if "PUBLIC BANK" in t or "PBB" in t:
         return "pbb"
-
     if "RHB" in t:
         return "rhb"
-
     if "BANK ISLAM" in t or "BIMB" in t:
         return "bank_islam"
 
     return "unknown"
 
 
-def parse_page_by_bank(text, page_obj, page_num, bank_hint, default_year, source_file):
+def parse_page_by_bank(
+    text,
+    page_obj,
+    page_num,
+    pdf_obj,
+    bank_hint,
+    default_year,
+    source_file
+):
     """
-    Returns (transactions, bank_name)
-    This is the unified parser router.
+    Returns (transaction_list, bank_name)
+    pdf_obj = full pdfplumber object (needed for Bank Islam)
     """
 
-    # -------------------------------
-    # 1. Manual Bank Selection
-    # -------------------------------
+    # ------------------
+    # MANUAL SELECTION
+    # ------------------
     if bank_hint == "maybank":
         return parse_transactions_maybank(text, page_num, default_year), "Maybank"
 
@@ -55,9 +57,9 @@ def parse_page_by_bank(text, page_obj, page_num, bank_hint, default_year, source
     if bank_hint == "bank_islam":
         return parse_bank_islam(pdf_obj), "Bank Islam"
 
-    # -------------------------------
-    # 2. AUTO-DETECT MODE
-    # -------------------------------
+    # ------------------
+    # AUTO-DETECT MODE
+    # ------------------
     detected = detect_bank_by_text(text)
 
     if detected == "cimb":
@@ -75,6 +77,4 @@ def parse_page_by_bank(text, page_obj, page_num, bank_hint, default_year, source
     if detected == "bank_islam":
         return parse_bank_islam(pdf_obj), "Bank Islam"
 
-
-    # Unknown bank
     return [], "Unknown"
