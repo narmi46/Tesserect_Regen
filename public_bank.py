@@ -1,10 +1,10 @@
 import re
 
-# ---------------------------------------------------------
-# Regex Patterns
-# ---------------------------------------------------------
+# ----------------------------
+# REGEX
+# ----------------------------
 
-# Date at start of line: "05/06 ..."
+# Date at start
 DATE_LINE = re.compile(r"^(?P<date>\d{2}/\d{2})\s+(?P<rest>.*)$")
 
 # Amount + balance ANYWHERE in the line
@@ -12,119 +12,129 @@ AMOUNT_BAL = re.compile(
     r"(?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})"
 )
 
-# Any "Balance ..." line with a date
+# Balance B/F and C/F
 BAL_ONLY = re.compile(
-    r"^(?P<date>\d{2}/\d{2})\s+.*Balance.*?(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$",
+    r"^(?P<date>\d{2}/\d{2}).*Balance.*?(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})",
     re.IGNORECASE,
 )
 
-# Metadata/Header lines to ignore
+# Transaction keyword starters (must match PBB)
+TX_STARTERS = (
+    "DEP", "DR-", "CR", "GIRO", "DUITNOW", "HANDLING", "CHRG", "CHARGE",
+    "RMT", "JOMPAY", "TSFR", "TRANSFER", "PAYMENT"
+)
+
 IGNORE_PREFIXES = [
-    "CLEAR WATER", "/ROC", "PVCWS", "2025", "IMEPS",
-    "PUBLIC BANK", "PAGE", "TEL:", "MUKA SURAT", "TARIKH",
-    "DATE", "NO.", "URUS NIAGA",
+    "CLEAR WATER", "/ROC", "PVCWS", "PUBLIC BANK", "DATE", "NO.",
+    "URUS NIAGA", "PAGE", "MUKA", "TEL:", "2025", "IMEPS"
 ]
+
+# ----------------------------
+# MAIN
+# ----------------------------
 
 def parse_transactions_pbb(text, page, year="2025"):
     tx = []
+
     prev_balance = None
     current_date = None
-    first_desc_line = None  # only the first line of the transaction
+    pending_desc = None   # Only keep the FIRST line of a transaction
 
-    def is_ignored(line: str) -> bool:
+    def ignored(line):
         u = line.upper()
         return any(u.startswith(p) for p in IGNORE_PREFIXES)
 
     for raw in text.splitlines():
         line = raw.strip()
-        if not line or is_ignored(line):
+        if not line or ignored(line):
             continue
 
-        # -----------------------------------------
-        # 1) Balance-only lines (no transaction row)
-        # -----------------------------------------
+        # ----------------------------
+        # CASE 1 — Balance B/F or C/F
+        # ----------------------------
         m_bal = BAL_ONLY.match(line)
         if m_bal:
             current_date = m_bal.group("date")
             prev_balance = float(m_bal.group("balance").replace(",", ""))
-            first_desc_line = None
+            pending_desc = None
             continue
 
-        # -----------------------------------------
-        # 2) Date line (may or may not also have amount)
-        #    IMPORTANT: do NOT "continue" here. We still
-        #    want to check the same line for amount+balance.
-        # -----------------------------------------
+        # ----------------------------
+        # CASE 2 — DATE line
+        # ----------------------------
         m_date = DATE_LINE.match(line)
         if m_date:
             current_date = m_date.group("date")
-            # FIRST line of description for this date
-            first_desc_line = m_date.group("rest").strip()
+            pending_desc = m_date.group("rest").strip()
+            # Still continue because the *same line* may contain amount+balance
+            # We do NOT "continue" here so the amount detector still runs
 
-        # -----------------------------------------
-        # 3) Amount + balance line (this is the real
-        #    transaction line we care about)
-        # -----------------------------------------
+        # ----------------------------
+        # CASE 3 — Amount + Balance line → THIS is the REAL transaction row
+        # ----------------------------
         m_amt = AMOUNT_BAL.search(line)
-        if not m_amt:
-            # no amount, no need to do anything else on this line
+        if m_amt:
+            amount = float(m_amt.group("amount").replace(",", ""))
+            balance = float(m_amt.group("balance").replace(",", ""))
+
+            # If no description captured earlier:
+            # Either this line starts with a keyword OR use this line (minus numbers)
+            if pending_desc:
+                desc = pending_desc
+            else:
+                # Remove the numeric part
+                desc = line.replace(m_amt.group(0), "").strip()
+
+            # ----------------------------
+            # DETERMINE DEBIT / CREDIT from balance movement ONLY
+            # ----------------------------
+            debit = credit = 0.0
+
+            if prev_balance is not None:
+                diff = balance - prev_balance
+                if diff > 0:
+                    credit = diff
+                elif diff < 0:
+                    debit = -diff
+            else:
+                # First tx, fallback
+                credit = amount
+
+            # ----------------------------
+            # Date formatting
+            # ----------------------------
+            if current_date:
+                dd, mm = current_date.split("/")
+                iso = f"{year}-{mm}-{dd}"
+            else:
+                iso = f"{year}-01-01"
+
+            tx.append({
+                "date": iso,
+                "description": desc,
+                "debit": round(debit, 2),
+                "credit": round(credit, 2),
+                "balance": balance,
+                "page": page,
+                "source_file": "statement.pdf"
+            })
+
+            prev_balance = balance
+            pending_desc = None
             continue
 
-        stated_amount = float(m_amt.group("amount").replace(",", ""))
-        new_balance = float(m_amt.group("balance").replace(",", ""))
+        # ----------------------------
+        # CASE 4 — A line starting with a transaction keyword
+        #         but NO date on this line.
+        #         (e.g. "DEP-ECP 234003 14.35 13,744.33")
+        # ----------------------------
+        if any(line.startswith(k) for k in TX_STARTERS):
+            # store first line as description
+            pending_desc = line
+            # do NOT continue — amount+balance may be on next line
+            continue
 
-        # Description:
-        # - If we already captured a first_desc_line for this date, use that.
-        # - Otherwise, use this line text minus the numeric part.
-        if first_desc_line:
-            desc = first_desc_line
-        else:
-            desc = line.replace(m_amt.group(0), "").strip()
-
-        # -----------------------------------------
-        # 4) Compute debit / credit from BALANCE ONLY
-        # -----------------------------------------
-        debit = credit = 0.0
-
-        if prev_balance is not None:
-            diff = round(new_balance - prev_balance, 2)
-
-            if diff > 0:
-                credit = abs(diff)
-            elif diff < 0:
-                debit = abs(diff)
-            # if diff == 0: no movement (unlikely)
-        else:
-            # first transaction on statement/page –
-            # fall back to stated amount as credit
-            credit = stated_amount
-
-        # -----------------------------------------
-        # 5) Date to ISO format
-        # -----------------------------------------
-        if current_date:
-            dd, mm = current_date.split("/")
-            iso_date = f"{year}-{mm}-{dd}"
-        else:
-            iso_date = f"{year}-01-01"
-
-        # -----------------------------------------
-        # 6) Append transaction row
-        # -----------------------------------------
-        tx.append({
-            "date": iso_date,
-            "description": desc,
-            "debit": debit,
-            "credit": credit,
-            "balance": new_balance,
-            "page": page,
-            "source_file": "test.pdf",  # or your real filename
-        })
-
-        # update state for next row
-        prev_balance = new_balance
-        # we only want the FIRST line per transaction; clear so
-        # a new transaction on same date won't reuse old desc
-        first_desc_line = None
+        # Other random continuation lines → safely ignored
+        # (IMEPS, GHL, CIM, etc.)
 
     return tx
