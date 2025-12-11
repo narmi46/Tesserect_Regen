@@ -1,16 +1,17 @@
 import streamlit as st
 import pdfplumber
 import pandas as pd
-import io
 
 from banks import parse_page_by_bank, detect_bank_by_text
 from exporter import dataframe_to_ascii, dataframe_to_json
+
 
 # -------------------------------
 # Streamlit Setup
 # -------------------------------
 st.set_page_config(page_title="Bank Parser", layout="wide")
 st.title("📄 Bank Statement Parser (Multi-Bank)")
+
 
 # -------------------------------
 # Session State
@@ -19,6 +20,7 @@ if "status" not in st.session_state:
     st.session_state.status = "idle"
 if "results" not in st.session_state:
     st.session_state.results = []
+
 
 # -------------------------------
 # Bank Selection
@@ -40,7 +42,8 @@ bank_map = {
     "Bank Islam": "bank_islam"
 }
 
-bank_hint = bank_map.get(bank_choice)
+bank_hint = bank_map.get(bank_choice)  # Auto-detect = None
+
 
 # -------------------------------
 # File Upload
@@ -51,6 +54,7 @@ uploaded_files = st.file_uploader(
 
 default_year = st.text_input("Default Year", "2025")
 
+
 # -------------------------------
 # Auto-detect Preview
 # -------------------------------
@@ -59,8 +63,7 @@ if uploaded_files and bank_hint is None:
 
     for f in uploaded_files:
         try:
-            buffer = io.BytesIO(f.getvalue())
-            with pdfplumber.open(buffer) as pdf:
+            with pdfplumber.open(f) as pdf:
                 text = pdf.pages[0].extract_text() or ""
                 detected = detect_bank_by_text(text)
 
@@ -77,6 +80,7 @@ if uploaded_files and bank_hint is None:
 
         except Exception as e:
             st.error(f"Preview error for {f.name}: {e}")
+
 
 # -------------------------------
 # Controls
@@ -99,6 +103,7 @@ with col3:
 
 st.write(f"### Status: **{st.session_state.status.upper()}**")
 
+
 # -------------------------------
 # MAIN PROCESSING LOOP
 # -------------------------------
@@ -110,11 +115,7 @@ if uploaded_files and st.session_state.status == "running":
     for f in uploaded_files:
         st.write(f"### Processing {f.name}")
 
-        # Always read full bytes FIRST — safe for Streamlit
-        raw_bytes = f.getvalue()
-        pdf_buffer = io.BytesIO(raw_bytes)
-
-        with pdfplumber.open(pdf_buffer) as pdf:
+        with pdfplumber.open(f) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
 
                 if st.session_state.status == "stopped":
@@ -127,7 +128,7 @@ if uploaded_files and st.session_state.status == "running":
                     text=text,
                     page_obj=page,
                     page_num=page_num,
-                    pdf_obj=raw_bytes,     # ← PASS RAW PDF BYTES
+                    pdf_obj=pdf,        # <-- IMPORTANT
                     bank_hint=bank_hint,
                     default_year=default_year,
                     source_file=f.name
@@ -143,6 +144,7 @@ if uploaded_files and st.session_state.status == "running":
 
     st.session_state.results = collected
 
+
 # -------------------------------
 # DISPLAY RESULTS
 # -------------------------------
@@ -152,9 +154,11 @@ if st.session_state.results:
     df = pd.DataFrame(st.session_state.results)
     st.dataframe(df, use_container_width=True)
 
+    # JSON export
     json_data = dataframe_to_json(df)
     st.download_button("⬇ Download JSON", json_data, "transactions.json")
 
+    # TXT export
     ascii_data = dataframe_to_ascii(df)
     st.download_button("⬇ Download TXT", ascii_data, "transactions.txt")
 
