@@ -1,6 +1,7 @@
 import streamlit as st
 import pdfplumber
 import pandas as pd
+import io
 
 from banks import parse_page_by_bank, detect_bank_by_text
 from exporter import dataframe_to_ascii, dataframe_to_json
@@ -58,7 +59,8 @@ if uploaded_files and bank_hint is None:
 
     for f in uploaded_files:
         try:
-            with pdfplumber.open(f) as pdf:
+            buffer = io.BytesIO(f.getvalue())
+            with pdfplumber.open(buffer) as pdf:
                 text = pdf.pages[0].extract_text() or ""
                 detected = detect_bank_by_text(text)
 
@@ -108,10 +110,11 @@ if uploaded_files and st.session_state.status == "running":
     for f in uploaded_files:
         st.write(f"### Processing {f.name}")
 
-        raw_bytes = f.read()         # ← IMPORTANT
-        f.seek(0)                    # reset pointer for pdfplumber
+        # Always read full bytes FIRST — safe for Streamlit
+        raw_bytes = f.getvalue()
+        pdf_buffer = io.BytesIO(raw_bytes)
 
-        with pdfplumber.open(f) as pdf:
+        with pdfplumber.open(pdf_buffer) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
 
                 if st.session_state.status == "stopped":
@@ -124,7 +127,7 @@ if uploaded_files and st.session_state.status == "running":
                     text=text,
                     page_obj=page,
                     page_num=page_num,
-                    pdf_obj=raw_bytes,       # ← WE PASS BYTES HERE
+                    pdf_obj=raw_bytes,     # ← PASS RAW PDF BYTES
                     bank_hint=bank_hint,
                     default_year=default_year,
                     source_file=f.name
