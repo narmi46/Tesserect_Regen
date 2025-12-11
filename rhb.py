@@ -1,17 +1,15 @@
 import fitz  # PyMuPDF
 import re
+from datetime import datetime
 
-def parse_transactions_rhb(fitz_page, page_num, year=2024):
+def parse_transactions_rhb(pdf_path_or_page, page_num, year=2024):
     """
-    Parses RHB Bank transactions using PyMuPDF for reliable text extraction.
+    Parses RHB Bank transactions using PyMuPDF for better text extraction.
     
     Args:
-        fitz_page: A fitz.Page object (PyMuPDF page)
+        pdf_path_or_page: Either a file path string or a fitz.Page object
         page_num: Page number for reference
-        year: Year for the transactions (default 2024)
-    
-    Returns:
-        List of transaction dictionaries
+        year: Year for the transactions
     """
     transactions = []
     
@@ -22,16 +20,25 @@ def parse_transactions_rhb(fitz_page, page_num, year=2024):
         'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
     }
     
-    # Extract text
-    text = fitz_page.get_text("text")
+    # Get the page object
+    if isinstance(pdf_path_or_page, str):
+        doc = fitz.open(pdf_path_or_page)
+        page = doc[page_num - 1]
+    else:
+        page = pdf_path_or_page
+    
+    # Extract text with layout preservation
+    text = page.get_text("text")
     lines = text.split('\n')
+    
+    # Also extract structured text for better parsing
+    blocks = page.get_text("dict")["blocks"]
     
     i = 0
     while i < len(lines):
         line = lines[i].strip()
         
         # Match transaction line: DD Mon DESCRIPTION...
-        # Example: "07 Mar CDT CASH DEPOSIT 0000004470 1,000.00 1,000.00"
         date_match = re.match(r'^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(.+)', line, re.IGNORECASE)
         
         if not date_match:
@@ -43,127 +50,116 @@ def parse_transactions_rhb(fitz_page, page_num, year=2024):
         month_num = month_map.get(month, '01')
         rest = date_match.group(3).strip()
         
-        # Skip control/summary lines
-        skip_keywords = ['B/F BALANCE', 'C/F BALANCE', 'Total Count', 'TOTAL COUNT']
-        if any(skip in rest for skip in skip_keywords):
+        # Skip control lines
+        if any(skip in rest for skip in ['B/F BALANCE', 'C/F BALANCE', 'Total Count']):
             i += 1
             continue
         
         # Parse the rest of the line
+        # RHB Format: DESCRIPTION SERIAL DEBIT CREDIT BALANCE
+        # OR: DESCRIPTION SERIAL AMOUNT BALANCE
+        
         # Split into parts
         parts = rest.split()
         
-        # Extract numbers (amounts with optional commas and decimals)
+        # Find all numeric values (amounts with optional commas and decimals)
         numbers = []
         desc_parts = []
         
         for part in parts:
-            # Remove commas and check if it's a number
+            # Check if this is a number
             clean = part.replace(',', '')
             if re.match(r'^\d+(\.\d{2})?$', clean):
                 numbers.append(float(clean))
             else:
                 desc_parts.append(part)
         
-        # Must have at least a balance
         if len(numbers) < 1:
             i += 1
             continue
         
-        # Last number is always the balance
+        # Get balance (always last number)
         balance = numbers[-1]
         
-        # Build description from non-numeric parts
+        # Build description
         description = ' '.join(desc_parts)
         
-        # Look ahead for continuation lines (multi-line descriptions)
+        # Look ahead for continuation lines
         j = i + 1
         continuation_lines = []
-        
-        while j < len(lines) and j < i + 10:  # Look max 10 lines ahead
+        while j < len(lines) and j < i + 10:
             next_line = lines[j].strip()
             
-            # Stop if we hit another transaction (starts with date)
+            # Stop if we hit another date line
             if re.match(r'^\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', next_line, re.IGNORECASE):
                 break
             
-            # Skip empty lines
+            # Stop on empty lines
             if not next_line:
                 j += 1
                 continue
             
-            # Stop on table headers or separators
-            headers = ['Date', 'Tarikh', 'Description', 'Diskripsi', 'Cheque', 'Debit', 'Credit', 'Balance', 'Baki', '---']
-            if any(h in next_line for h in headers):
+            # Stop on table headers
+            if any(h in next_line for h in ['Date', 'Tarikh', 'Description', 'Debit', 'Credit', 'Balance', '---']):
                 break
             
-            # Stop if line is all numbers
+            # Stop if this line is all numbers (shouldn't happen but safety check)
             if re.match(r'^[\d,.\s]+$', next_line):
                 j += 1
                 continue
             
-            # Add as continuation line
+            # Add as continuation
             continuation_lines.append(next_line)
             j += 1
         
-        # Combine main description with continuation lines
+        # Combine description with continuations
         if continuation_lines:
             full_desc = description + ' ' + ' '.join(continuation_lines)
         else:
             full_desc = description
         
-        # Clean up whitespace
         full_desc = ' '.join(full_desc.split()).strip()
         
-        # Determine debit vs credit
+        # Determine debit/credit
         debit = 0.0
         credit = 0.0
         
-        # Based on how many numbers we found
+        # Analyze based on number of amounts found
         if len(numbers) >= 4:
             # Format: serial, debit, credit, balance
             debit = numbers[-3]
             credit = numbers[-2]
-            
         elif len(numbers) >= 3:
             # Format: serial, amount, balance
             amount = numbers[-2]
             
-            # Determine type based on keywords in description
+            # Determine type based on keywords
             upper_desc = full_desc.upper()
-            
-            # Credit indicators
-            credit_keywords = ['CR', 'CREDIT', 'DEPOSIT', 'INWARD', 'CDT', 'P2P CR', 'FUND TRF-CR', 'FUND TRF CR']
-            # Debit indicators
-            debit_keywords = ['DR', 'DEBIT', 'WITHDRAWAL', 'FEES', 'TRF DR', 'P2P DR', 'FUND TRF-DR', 'FUND TRF DR']
-            
-            if any(kw in upper_desc for kw in credit_keywords):
+            if any(kw in upper_desc for kw in ['CR', 'CREDIT', 'DEPOSIT', 'INWARD', 'CDT', 'P2P CR']):
                 credit = amount
-            elif any(kw in upper_desc for kw in debit_keywords):
+            elif any(kw in upper_desc for kw in ['DR', 'DEBIT', 'WITHDRAWAL', 'FEES', 'TRF DR']):
                 debit = amount
             else:
-                # Fallback: check if description ends with DR
-                if upper_desc.endswith(' DR') or 'TRF DR' in upper_desc:
+                # Default logic
+                if 'TRF DR' in upper_desc or upper_desc.endswith(' DR'):
                     debit = amount
                 else:
                     credit = amount
-                    
         elif len(numbers) == 2:
-            # Format: amount, balance (no serial number)
+            # Format: amount, balance
             amount = numbers[-2]
             upper_desc = full_desc.upper()
             
-            # Determine based on keywords
             if any(kw in upper_desc for kw in ['CR', 'CREDIT', 'DEPOSIT', 'INWARD']):
                 credit = amount
             else:
                 debit = amount
         
-        # Format date as YYYY-MM-DD
+        # Format date
         iso_date = f"{year}-{month_num}-{day}"
         
-        # Add transaction if description is valid
-        if full_desc and full_desc != '':
+        # Add transaction
+        if full_desc:
             transactions.append({
                 "date": iso_date,
                 "description": full_desc,
@@ -173,7 +169,7 @@ def parse_transactions_rhb(fitz_page, page_num, year=2024):
                 "page": page_num
             })
         
-        # Move index to after continuation lines
+        # Move to next transaction
         i = j if j > i else i + 1
     
     return transactions
