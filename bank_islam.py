@@ -10,7 +10,7 @@ def clean_amount(value):
     return float(value.replace(",", "").strip())
 
 
-def parse_bank_islam_pymupdf(path):
+def parse_bank_islam(path):
     doc = fitz.open(path)
     transactions = []
     current = None
