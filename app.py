@@ -2,6 +2,7 @@ import streamlit as st
 import pdfplumber
 import json
 import pandas as pd
+from datetime import datetime
 
 # Import parsers
 from maybank import parse_transactions_maybank
@@ -101,7 +102,7 @@ with col3:
     if st.button("🔄 Reset"):
         st.session_state.status = "idle"
         st.session_state.results = []
-        st.experimental_rerun()
+        st.rerun()
 
 st.write(f"### ⚙️ Status: **{st.session_state.status.upper()}**")
 
@@ -208,6 +209,43 @@ if uploaded_files and st.session_state.status == "running":
 
 
 # ---------------------------------------------------
+# CALCULATE MONTHLY SUMMARY
+# ---------------------------------------------------
+def calculate_monthly_summary(transactions):
+    if not transactions:
+        return []
+    
+    df = pd.DataFrame(transactions)
+    
+    # Parse dates
+    df['date_parsed'] = pd.to_datetime(df['date'], errors='coerce')
+    df = df.dropna(subset=['date_parsed'])
+    
+    # Extract year-month
+    df['year_month'] = df['date_parsed'].dt.to_period('M')
+    
+    # Convert debit, credit, balance to float
+    df['debit'] = pd.to_numeric(df['debit'], errors='coerce').fillna(0)
+    df['credit'] = pd.to_numeric(df['credit'], errors='coerce').fillna(0)
+    df['balance'] = pd.to_numeric(df['balance'], errors='coerce')
+    
+    # Group by year_month
+    monthly_summary = []
+    for ym, group in df.groupby('year_month'):
+        summary = {
+            'month': str(ym),
+            'total_debit': round(group['debit'].sum(), 2),
+            'total_credit': round(group['credit'].sum(), 2),
+            'lowest_balance': round(group['balance'].min(), 2) if not group['balance'].isna().all() else None,
+            'highest_balance': round(group['balance'].max(), 2) if not group['balance'].isna().all() else None,
+            'transaction_count': len(group)
+        }
+        monthly_summary.append(summary)
+    
+    return sorted(monthly_summary, key=lambda x: x['month'])
+
+
+# ---------------------------------------------------
 # DISPLAY RESULTS
 # ---------------------------------------------------
 if st.session_state.results:
@@ -220,10 +258,40 @@ if st.session_state.results:
 
     st.dataframe(df, use_container_width=True)
 
-    # JSON Export
-    json_data = json.dumps(df.to_dict(orient="records"), indent=4)
-    st.download_button("⬇️ Download JSON", json_data, file_name="transactions.json", mime="application/json")
+    # Calculate monthly summary
+    monthly_summary = calculate_monthly_summary(st.session_state.results)
+    
+    if monthly_summary:
+        st.subheader("📅 Monthly Summary")
+        summary_df = pd.DataFrame(monthly_summary)
+        st.dataframe(summary_df, use_container_width=True)
 
+    # JSON Export - Transactions Only
+    st.subheader("⬇️ Download Options")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        json_transactions = json.dumps(df.to_dict(orient="records"), indent=4)
+        st.download_button(
+            "📄 Download Transactions (JSON)", 
+            json_transactions, 
+            file_name="transactions.json", 
+            mime="application/json"
+        )
+    
+    with col2:
+        # JSON Export - Full Report with Summary
+        full_report = {
+            "transactions": df.to_dict(orient="records"),
+            "monthly_summary": monthly_summary
+        }
+        json_full_report = json.dumps(full_report, indent=4)
+        st.download_button(
+            "📊 Download Full Report (JSON)", 
+            json_full_report, 
+            file_name="full_report.json", 
+            mime="application/json"
+        )
 
 else:
     if uploaded_files:
