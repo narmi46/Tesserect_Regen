@@ -1,175 +1,154 @@
-import fitz  # PyMuPDF
 import re
-from datetime import datetime
 
-def parse_transactions_rhb(pdf_path_or_page, page_num, year=2024):
-    """
-    Parses RHB Bank transactions using PyMuPDF for better text extraction.
+# ---------------------------------------------------------
+# Regex Patterns
+# ---------------------------------------------------------
+# Matches date at start of line: "05/06 ..."
+DATE_LINE = re.compile(r"^(?P<date>\d{2}/\d{2})\s+(?P<rest>.*)$")
+
+# Matches amount + balance at end of line: "1,200.00 45,000.00"
+AMOUNT_BAL = re.compile(r"(?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$")
+
+# Matches "Balance B/F" lines (updates tracking, but does not create a transaction row)
+BAL_ONLY = re.compile(r"^(?P<date>\d{2}/\d{2})\s+(Balance.*)\s+(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$", re.IGNORECASE)
+
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+# Keywords that indicate the start of a transaction
+TX_KEYWORDS = [
+    "TSFR", "DUITNOW", "GIRO", "JOMPAY", "RMT", "DR-ECP",
+    "HANDLING", "FEE", "DEP", "RTN", "PROFIT", "AUTOMATED",
+    "CHARGES", "DEBIT", "CREDIT"
+]
+
+# Metadata/Header lines to ignore
+IGNORE_PREFIXES = [
+    "CLEAR WATER", "/ROC", "PVCWS", "2025", "IMEPS", 
+    "PUBLIC BANK", "PAGE", "TEL:", "MUKA SURAT", "TARIKH", 
+    "DATE", "NO.", "URUS NIAGA"
+]
+
+# ---------------------------------------------------------
+# Main Logic
+# ---------------------------------------------------------
+def parse_transactions_pbb(text, page, year="2025"):
+    tx = []
+    current_date = None
+    prev_balance = None
     
-    Args:
-        pdf_path_or_page: Either a file path string or a fitz.Page object
-        page_num: Page number for reference
-        year: Year for the transactions
-    """
-    transactions = []
+    # State holders
+    desc_accum = ""
+    waiting_for_amount = False
     
-    # Month mapping
-    month_map = {
-        'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
-        'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
-        'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
-    }
+    def is_ignored(line):
+        return any(line.upper().startswith(p) for p in IGNORE_PREFIXES)
+
+    def is_tx_start(line):
+        return any(line.startswith(k) for k in TX_KEYWORDS)
+
+    lines = text.splitlines()
     
-    # Get the page object
-    if isinstance(pdf_path_or_page, str):
-        doc = fitz.open(pdf_path_or_page)
-        page = doc[page_num - 1]
-    else:
-        page = pdf_path_or_page
-    
-    # Extract text with layout preservation
-    text = page.get_text("text")
-    lines = text.split('\n')
-    
-    # Also extract structured text for better parsing
-    blocks = page.get_text("dict")["blocks"]
-    
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        
-        # Match transaction line: DD Mon DESCRIPTION...
-        date_match = re.match(r'^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(.+)', line, re.IGNORECASE)
-        
-        if not date_match:
-            i += 1
+    for line in lines:
+        line = line.strip()
+        if not line or is_ignored(line):
             continue
+
+        # 1. Check for Amounts FIRST
+        amount_match = AMOUNT_BAL.search(line)
+        has_amount = bool(amount_match)
         
-        day = date_match.group(1).zfill(2)
-        month = date_match.group(2).capitalize()
-        month_num = month_map.get(month, '01')
-        rest = date_match.group(3).strip()
+        # 2. Check for Start of New Transaction (Date or Keyword)
+        date_match = DATE_LINE.match(line)
+        keyword_match = is_tx_start(line)
+        is_new_start = date_match or keyword_match
         
-        # Skip control lines
-        if any(skip in rest for skip in ['B/F BALANCE', 'C/F BALANCE', 'Total Count']):
-            i += 1
+        # 3. SPECIAL CASE: Balance B/F (Update tracking only)
+        bal_match = BAL_ONLY.match(line)
+        if bal_match:
+            current_date = bal_match.group("date")
+            prev_balance = float(bal_match.group("balance").replace(",", ""))
+            desc_accum = ""
+            waiting_for_amount = False 
             continue
+
+        # -------------------------------------------------------
+        # LOGIC BRANCHING
+        # -------------------------------------------------------
         
-        # Parse the rest of the line
-        # RHB Format: DESCRIPTION SERIAL DEBIT CREDIT BALANCE
-        # OR: DESCRIPTION SERIAL AMOUNT BALANCE
-        
-        # Split into parts
-        parts = rest.split()
-        
-        # Find all numeric values (amounts with optional commas and decimals)
-        numbers = []
-        desc_parts = []
-        
-        for part in parts:
-            # Check if this is a number
-            clean = part.replace(',', '')
-            if re.match(r'^\d+(\.\d{2})?$', clean):
-                numbers.append(float(clean))
-            else:
-                desc_parts.append(part)
-        
-        if len(numbers) < 1:
-            i += 1
-            continue
-        
-        # Get balance (always last number)
-        balance = numbers[-1]
-        
-        # Build description
-        description = ' '.join(desc_parts)
-        
-        # Look ahead for continuation lines
-        j = i + 1
-        continuation_lines = []
-        while j < len(lines) and j < i + 10:
-            next_line = lines[j].strip()
+        # CASE A: Line HAS amounts
+        if has_amount:
+            # Extract numbers
+            amount = float(amount_match.group("amount").replace(",", ""))
+            balance = float(amount_match.group("balance").replace(",", ""))
             
-            # Stop if we hit another date line
-            if re.match(r'^\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', next_line, re.IGNORECASE):
-                break
-            
-            # Stop on empty lines
-            if not next_line:
-                j += 1
-                continue
-            
-            # Stop on table headers
-            if any(h in next_line for h in ['Date', 'Tarikh', 'Description', 'Debit', 'Credit', 'Balance', '---']):
-                break
-            
-            # Stop if this line is all numbers (shouldn't happen but safety check)
-            if re.match(r'^[\d,.\s]+$', next_line):
-                j += 1
-                continue
-            
-            # Add as continuation
-            continuation_lines.append(next_line)
-            j += 1
-        
-        # Combine description with continuations
-        if continuation_lines:
-            full_desc = description + ' ' + ' '.join(continuation_lines)
-        else:
-            full_desc = description
-        
-        full_desc = ' '.join(full_desc.split()).strip()
-        
-        # Determine debit/credit
-        debit = 0.0
-        credit = 0.0
-        
-        # Analyze based on number of amounts found
-        if len(numbers) >= 4:
-            # Format: serial, debit, credit, balance
-            debit = numbers[-3]
-            credit = numbers[-2]
-        elif len(numbers) >= 3:
-            # Format: serial, amount, balance
-            amount = numbers[-2]
-            
-            # Determine type based on keywords
-            upper_desc = full_desc.upper()
-            if any(kw in upper_desc for kw in ['CR', 'CREDIT', 'DEPOSIT', 'INWARD', 'CDT', 'P2P CR']):
-                credit = amount
-            elif any(kw in upper_desc for kw in ['DR', 'DEBIT', 'WITHDRAWAL', 'FEES', 'TRF DR']):
-                debit = amount
-            else:
-                # Default logic
-                if 'TRF DR' in upper_desc or upper_desc.endswith(' DR'):
-                    debit = amount
+            # Identify if this is a NEW single-line transaction or Continuation
+            if is_new_start:
+                if date_match:
+                    current_date = date_match.group("date")
+                    line_desc = date_match.group("rest")
                 else:
-                    credit = amount
-        elif len(numbers) == 2:
-            # Format: amount, balance
-            amount = numbers[-2]
-            upper_desc = full_desc.upper()
-            
-            if any(kw in upper_desc for kw in ['CR', 'CREDIT', 'DEPOSIT', 'INWARD']):
-                credit = amount
+                    # Remove amount from line to get clean description
+                    line_desc = line.replace(amount_match.group(0), "").strip()
+                
+                final_desc = line_desc
             else:
-                debit = amount
-        
-        # Format date
-        iso_date = f"{year}-{month_num}-{day}"
-        
-        # Add transaction
-        if full_desc:
-            transactions.append({
-                "date": iso_date,
-                "description": full_desc,
+                # Merge with accumulated description
+                final_desc = desc_accum + " " + line.replace(amount_match.group(0), "").strip()
+
+            # Determine Debit vs Credit
+            debit = 0.0
+            credit = 0.0
+            
+            if prev_balance is not None:
+                if balance < prev_balance:
+                    debit = amount
+                elif balance > prev_balance:
+                    credit = amount
+            else:
+                # Fallback if first item on page
+                if "CR" in final_desc.upper() or "DEP" in final_desc.upper():
+                    credit = amount
+                else:
+                    debit = amount
+
+            # Date Formatting
+            if current_date:
+                dd, mm = current_date.split("/")
+                iso = f"{year}-{mm}-{dd}"
+            else:
+                iso = f"{year}-01-01"
+
+            # APPEND TO LIST IMMEDIATELY (Preserves Order)
+            tx.append({
+                "date": iso,
+                "description": final_desc.strip(),
                 "debit": debit,
                 "credit": credit,
                 "balance": balance,
-                "page": page_num
+                "page": page,
+                "source_file": "test.pdf"
             })
-        
-        # Move to next transaction
-        i = j if j > i else i + 1
-    
-    return transactions
+            
+            # Reset State
+            prev_balance = balance
+            desc_accum = ""
+            waiting_for_amount = False
+
+        # CASE B: No amounts, but STARTS a new transaction
+        elif is_new_start:
+            if date_match:
+                current_date = date_match.group("date")
+                desc_accum = date_match.group("rest")
+            else:
+                desc_accum = line
+            
+            waiting_for_amount = True
+
+        # CASE C: Continuation text
+        elif waiting_for_amount:
+            desc_accum += " " + line
+
+    # No sorting is applied. 
+    # The list 'tx' is returned exactly in the order the lines were processed.
+    return tx
