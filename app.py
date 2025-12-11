@@ -176,8 +176,11 @@ if uploaded_files and bank_hint is None:
                     detected_bank = "Maybank"
                 elif "PUBLIC BANK" in text.upper() or "PBB" in text.upper():
                     detected_bank = "Public Bank (PBB)"
-                elif "RHB" in text.upper():
+                elif bank_hint == "rhb":
                     detected_bank = "RHB Bank"
+                        # Use statement_year if available, otherwise default_year
+                        year_to_use = statement_month[0] if statement_month else int(default_year)
+                        tx = parse_transactions_rhb(text, page_num, year_to_use)
                 
                 # Extract statement month
                 statement_month = extract_statement_month(pdf, uploaded_file.name)
@@ -235,9 +238,18 @@ def auto_detect_and_parse(text, page_obj, page_num, default_year="2025", **sourc
         return tx, "Public Bank (PBB)"
 
     # RHB
-    tx = parse_transactions_rhb(text, page_num)
-    if tx:
-        return tx, "RHB Bank"
+    year_to_use = int(default_year)
+# Try to extract year from source_file if provided
+        if 'source_file' in source_file_kwargs:
+            filename = source_file_kwargs['source_file']
+            year_match = re.search(r'(20\d{2})', filename)
+            
+            if year_match:
+                year_to_use = int(year_match.group(1))
+
+tx = parse_transactions_rhb(text, page_num, year_to_use)
+if tx:
+    return tx, "RHB Bank"
 
     return [], "Unknown"
 
