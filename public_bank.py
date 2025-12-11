@@ -1,154 +1,93 @@
 import re
 
-# ---------------------------------------------------------
-# Regex Patterns
-# ---------------------------------------------------------
-# Matches date at start of line: "05/06 ..."
-DATE_LINE = re.compile(r"^(?P<date>\d{2}/\d{2})\s+(?P<rest>.*)$")
+# Detect amount + balance anywhere in the line
+AMOUNT_BAL = re.compile(
+    r"(?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})"
+)
 
-# Matches amount + balance at end of line: "1,200.00 45,000.00"
-AMOUNT_BAL = re.compile(r"(?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$")
+# Detect date at beginning of line
+DATE_LINE = re.compile(r"^(?P<date>\d{2}/\d{2})\s+(?P<desc>.*)$")
 
-# Matches "Balance B/F" lines (updates tracking, but does not create a transaction row)
-BAL_ONLY = re.compile(r"^(?P<date>\d{2}/\d{2})\s+(Balance.*)\s+(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$", re.IGNORECASE)
+# Balance B/F (start-of-page)
+BAL_ONLY = re.compile(
+    r"^(?P<date>\d{2}/\d{2})\s+Balance.*?(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})",
+    re.IGNORECASE,
+)
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
-# Keywords that indicate the start of a transaction
-TX_KEYWORDS = [
-    "TSFR", "DUITNOW", "GIRO", "JOMPAY", "RMT", "DR-ECP",
-    "HANDLING", "FEE", "DEP", "RTN", "PROFIT", "AUTOMATED",
-    "CHARGES", "DEBIT", "CREDIT"
-]
-
-# Metadata/Header lines to ignore
-IGNORE_PREFIXES = [
-    "CLEAR WATER", "/ROC", "PVCWS", "2025", "IMEPS", 
-    "PUBLIC BANK", "PAGE", "TEL:", "MUKA SURAT", "TARIKH", 
-    "DATE", "NO.", "URUS NIAGA"
-]
-
-# ---------------------------------------------------------
-# Main Logic
-# ---------------------------------------------------------
-def parse_transactions_pbb(text, page, year="2025"):
+def parse_simple(text, page, year="2025"):
     tx = []
-    current_date = None
     prev_balance = None
-    
-    # State holders
-    desc_accum = ""
-    waiting_for_amount = False
-    
-    def is_ignored(line):
-        return any(line.upper().startswith(p) for p in IGNORE_PREFIXES)
+    current_date = None
+    pending_desc = None  # store ONLY THE FIRST LINE OF A TRANSACTION
 
-    def is_tx_start(line):
-        return any(line.startswith(k) for k in TX_KEYWORDS)
-
-    lines = text.splitlines()
-    
-    for line in lines:
-        line = line.strip()
-        if not line or is_ignored(line):
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
             continue
 
-        # 1. Check for Amounts FIRST
-        amount_match = AMOUNT_BAL.search(line)
-        has_amount = bool(amount_match)
-        
-        # 2. Check for Start of New Transaction (Date or Keyword)
-        date_match = DATE_LINE.match(line)
-        keyword_match = is_tx_start(line)
-        is_new_start = date_match or keyword_match
-        
-        # 3. SPECIAL CASE: Balance B/F (Update tracking only)
-        bal_match = BAL_ONLY.match(line)
-        if bal_match:
-            current_date = bal_match.group("date")
-            prev_balance = float(bal_match.group("balance").replace(",", ""))
-            desc_accum = ""
-            waiting_for_amount = False 
+        # ---------------------------
+        # Balance B/F
+        # ---------------------------
+        m_bal = BAL_ONLY.match(line)
+        if m_bal:
+            current_date = m_bal.group("date")
+            prev_balance = float(m_bal.group("balance").replace(",", ""))
+            pending_desc = None
             continue
 
-        # -------------------------------------------------------
-        # LOGIC BRANCHING
-        # -------------------------------------------------------
-        
-        # CASE A: Line HAS amounts
-        if has_amount:
-            # Extract numbers
-            amount = float(amount_match.group("amount").replace(",", ""))
-            balance = float(amount_match.group("balance").replace(",", ""))
-            
-            # Identify if this is a NEW single-line transaction or Continuation
-            if is_new_start:
-                if date_match:
-                    current_date = date_match.group("date")
-                    line_desc = date_match.group("rest")
-                else:
-                    # Remove amount from line to get clean description
-                    line_desc = line.replace(amount_match.group(0), "").strip()
-                
-                final_desc = line_desc
-            else:
-                # Merge with accumulated description
-                final_desc = desc_accum + " " + line.replace(amount_match.group(0), "").strip()
+        # ---------------------------
+        # Detect a date → start a new transaction description
+        # ---------------------------
+        m_date = DATE_LINE.match(line)
+        if m_date:
+            current_date = m_date.group("date")
+            pending_desc = m_date.group("desc").strip()   # store only 1st line
+            continue
 
-            # Determine Debit vs Credit
-            debit = 0.0
-            credit = 0.0
-            
-            if prev_balance is not None:
-                if balance < prev_balance:
-                    debit = amount
-                elif balance > prev_balance:
-                    credit = amount
-            else:
-                # Fallback if first item on page
-                if "CR" in final_desc.upper() or "DEP" in final_desc.upper():
-                    credit = amount
-                else:
-                    debit = amount
+        # ---------------------------
+        # Detect an amount + balance line
+        # ---------------------------
+        m_amt = AMOUNT_BAL.search(line)
+        if not m_amt:
+            continue  # ignore everything else
 
-            # Date Formatting
-            if current_date:
-                dd, mm = current_date.split("/")
-                iso = f"{year}-{mm}-{dd}"
-            else:
-                iso = f"{year}-01-01"
+        amount = float(m_amt.group("amount").replace(",", ""))
+        balance = float(m_amt.group("balance").replace(",", ""))
 
-            # APPEND TO LIST IMMEDIATELY (Preserves Order)
-            tx.append({
-                "date": iso,
-                "description": final_desc.strip(),
-                "debit": debit,
-                "credit": credit,
-                "balance": balance,
-                "page": page,
-                "source_file": "test.pdf"
-            })
-            
-            # Reset State
-            prev_balance = balance
-            desc_accum = ""
-            waiting_for_amount = False
+        # If description was not started by date line → use this line as desc
+        desc = pending_desc if pending_desc else line.replace(m_amt.group(0), "").strip()
 
-        # CASE B: No amounts, but STARTS a new transaction
-        elif is_new_start:
-            if date_match:
-                current_date = date_match.group("date")
-                desc_accum = date_match.group("rest")
-            else:
-                desc_accum = line
-            
-            waiting_for_amount = True
+        # Determine debit or credit
+        debit = credit = 0.0
+        if prev_balance is not None:
+            if balance < prev_balance:
+                debit = amount
+            elif balance > prev_balance:
+                credit = amount
+        else:
+            # first entry fallback
+            debit = 0
+            credit = amount
 
-        # CASE C: Continuation text
-        elif waiting_for_amount:
-            desc_accum += " " + line
+        # Format ISO date
+        if current_date:
+            dd, mm = current_date.split("/")
+            iso = f"{year}-{mm}-{dd}"
+        else:
+            iso = f"{year}-01-01"
 
-    # No sorting is applied. 
-    # The list 'tx' is returned exactly in the order the lines were processed.
+        tx.append({
+            "date": iso,
+            "description": desc,
+            "debit": debit,
+            "credit": credit,
+            "balance": balance,
+            "page": page,
+            "source_file": "statement.pdf"
+        })
+
+        # Reset
+        prev_balance = balance
+        pending_desc = None
+
     return tx
