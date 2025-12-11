@@ -1,14 +1,28 @@
-# banks.py
-import fitz  # ensure at top of file
 from maybank import parse_transactions_maybank
 from public_bank import parse_transactions_pbb
 from rhb import parse_transactions_rhb
 from cimb import parse_transactions_cimb
 from bank_islam import parse_bank_islam
 
+import fitz  # PyMuPDF
 
+
+# -----------------------------
+# LOAD PyMuPDF FROM pdfplumber
+# -----------------------------
+def convert_pdfplumber_to_pymupdf(pdf_obj):
+    """
+    pdf_obj = pdfplumber PDF
+    Returns PyMuPDF document
+    """
+    raw = pdf_obj.open(original=True).read()
+    return fitz.open(stream=raw, filetype="pdf")
+
+
+# -----------------------------
+# AUTO-DETECT BANK
+# -----------------------------
 def detect_bank_by_text(text: str):
-    """Auto-detect bank by scanning PDF text."""
     t = text.upper()
 
     if "CIMB" in t:
@@ -25,30 +39,20 @@ def detect_bank_by_text(text: str):
     return "unknown"
 
 
-def parse_page_by_bank(
-    text,
-    page_obj,
-    page_num,
-    pdf_obj,
-    bank_hint,
-    default_year,
-    source_file
-):
-    """
-    Returns (transaction_list, bank_name)
-    pdf_obj = full pdfplumber object (needed for Bank Islam)
-    """
+# -----------------------------
+# MAIN DISPATCHER
+# -----------------------------
+def parse_page_by_bank(text, page_obj, page_num, pdf_obj, bank_hint, default_year, source_file):
 
-    # ------------------
-    # MANUAL SELECTION
-    # ------------------
+    # =========================
+    # MANUAL OVERRIDE FIRST
+    # =========================
     if bank_hint == "maybank":
         return parse_transactions_maybank(text, page_num, default_year), "Maybank"
 
-
     if bank_hint == "pbb":
-        doc = load_pymupdf_from_pdfplumber(pdf_obj)
-        return parse_transactions_pbb(doc), "Public Bank (PBB)"
+        doc = convert_pdfplumber_to_pymupdf(pdf_obj)
+        return parse_transactions_pbb(doc, year=default_year), "Public Bank (PBB)"
 
     if bank_hint == "rhb":
         return parse_transactions_rhb(text, page_num), "RHB Bank"
@@ -59,20 +63,20 @@ def parse_page_by_bank(
     if bank_hint == "bank_islam":
         return parse_bank_islam(pdf_obj), "Bank Islam"
 
-    # ------------------
+    # ==================================
     # AUTO-DETECT MODE
-    # ------------------
+    # ==================================
     detected = detect_bank_by_text(text)
 
-    if detected == "cimb":
-        return parse_transactions_cimb(page_obj, page_num, source_file), "CIMB Bank"
+    if detected == "pbb":
+        doc = convert_pdfplumber_to_pymupdf(pdf_obj)
+        return parse_transactions_pbb(doc, year=default_year), "Public Bank (PBB)"
 
     if detected == "maybank":
         return parse_transactions_maybank(text, page_num, default_year), "Maybank"
 
-    if bank_hint == "pbb":
-        doc = load_pymupdf_from_pdfplumber(pdf_obj)
-        return parse_transactions_pbb(doc), "Public Bank (PBB)"
+    if detected == "cimb":
+        return parse_transactions_cimb(page_obj, page_num, source_file), "CIMB Bank"
 
     if detected == "rhb":
         return parse_transactions_rhb(text, page_num), "RHB Bank"
