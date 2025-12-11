@@ -1,3 +1,4 @@
+
 import regex as re
 
 # ============================================================
@@ -54,58 +55,10 @@ def classify_first_tx(desc, amount):
         "DEPOSIT" in s or
         "CDT" in s or
         "INWARD" in s or
-        "CREDIT" in s or
         s.endswith("CR")
     ):
         return 0.0, amount
     return amount, 0.0
-
-
-# ============================================================
-# HELPER: SKIP LINES THAT ARE HEADERS/SUMMARIES
-# ============================================================
-
-def should_skip_line(line):
-    """Check if line should be skipped (headers, summaries, etc.)"""
-    skip_patterns = [
-        r'Statement Period',
-        r'Beginning Balance',
-        r'Ending Balance',
-        r'Deposits \(Plus\)',
-        r'Withdraws \(Minus\)',
-        r'Interest Paid',
-        r'TRANSACTION STATEMENT',
-        r'Date\s+Branch\s+Description',
-        r'www\.rhbgroup\.com',
-        r'For Any Enquiries',
-        r'^To$',
-        r'Deposit Account Summary',
-        r'Reflex Cash Management',
-        r'Account\s*Name',
-        r'Account\s*Number',
-        r'Reference\s*1\s*/\s*Reference\s*2',
-        r'Sender\'s\s*/\s*Beneficiary',
-        r'RefNum\s+Amount',
-        r'^\s*\(RM\)\s*$',  # Skip "(RM)" line
-        r'DEPOSITACCOUNTSUMMARY',  # Skip summary header
-        r'OpeningBalance.*EndingBalance',  # Skip balance summary
-        r'NamaAkaun\s+NomborAkaun',  # Skip Malay headers
-    ]
-    
-    for pattern in skip_patterns:
-        if re.search(pattern, line, re.IGNORECASE):
-            return True
-    
-    # Skip lines that are just account holder names (all caps with SDN BHD etc)
-    if re.match(r'^[A-Z\s\.]+(?:SDN\.?\s*BHD\.?|SERVICES|ENTERPRISE)[\s\.]*$', line):
-        return True
-    
-    # Skip opening/closing balance summary lines
-    # Example: "ORDINARYCURRENTACCOUNT 21406200114180 0.00"
-    if re.match(r'^[A-Z\s]+\d{10,20}\s+[0-9,]+\.\d{2}', line):
-        return True
-        
-    return False
 
 
 # ============================================================
@@ -118,7 +71,7 @@ PATTERN_TX_A = re.compile(
     r"(.+?)\s+"                          # description
     r"(\d{4,20})\s+"                     # serial (4–20 digits)
     r"([0-9,]+\.\d{2})\s+"               # amount
-    r"([0-9,]+\.\d{2})$"                 # balance (end of line)
+    r"([0-9,]+\.\d{2})"                  # balance
 )
 
 PATTERN_BF_CF = re.compile(
@@ -127,12 +80,12 @@ PATTERN_BF_CF = re.compile(
 
 # -------- FORMAT B (Internet banking after export) --------
 PATTERN_TX_B = re.compile(
-    r'(\d{2}-\d{2}-\d{4})\s+'           # Date: 05-02-2025
-    r'(\d{3})\s+'                        # Branch: 770
-    r'(.+?)\s+'                          # Description (non-greedy)
-    r'(?:([0-9,]+\.\d{2})|-)\s+'        # Amount DR or -
-    r'(?:([0-9,]+\.\d{2})|-)\s+'        # Amount CR or -
-    r'([0-9,]+\.\d{2})([+-])'           # Balance with +/- sign
+    r"(\d{2}-\d{2}-\d{4})\s+"
+    r"(\d{3})\s+"
+    r"(.+?)\s+"
+    r"([0-9,]+\.\d{2}|-)\s+"
+    r"([0-9,]+\.\d{2}|-)\s+"
+    r"([0-9,]+\.\d{2})([+-])"
 )
 
 # -------- FORMAT C (New Islamic PDF: Jan 2025) --------
@@ -141,7 +94,7 @@ PATTERN_TX_C = re.compile(
     r"(.+?)\s+"                          # description (multi-word)
     r"(\d{4,20})\s+"                     # serial
     r"([0-9,]+\.\d{2})\s+"               # amount
-    r"([0-9,]+\.\d{2})$"                 # balance (end of line)
+    r"([0-9,]+\.\d{2})"                  # balance
 )
 
 
@@ -152,7 +105,7 @@ PATTERN_TX_C = re.compile(
 def parse_line_rhb(line, page_num, year=2025):
 
     line = line.strip()
-    if not line or should_skip_line(line):
+    if not line:
         return None
 
     # -------- FORMAT C: Islamic PDF (Jan 2025) --------
@@ -194,11 +147,9 @@ def parse_line_rhb(line, page_num, year=2025):
         dd, mm, yyyy = date_raw.split("-")
         date_fmt = f"{yyyy}-{mm}-{dd}"
 
-        # Parse debit/credit - already provided in statement
-        debit = float(dr_raw.replace(",", "")) if dr_raw else 0.0
-        credit = float(cr_raw.replace(",", "")) if cr_raw else 0.0
+        debit = float(dr_raw.replace(",", "")) if dr_raw != "-" else 0.0
+        credit = float(cr_raw.replace(",", "")) if cr_raw != "-" else 0.0
 
-        # Parse balance with sign
         bal = float(balance_raw.replace(",", ""))
         if sign == "-":
             bal = -bal
@@ -206,10 +157,8 @@ def parse_line_rhb(line, page_num, year=2025):
         return {
             "type": "tx",
             "date": date_fmt,
-            "description": fix_description(desc),
-            "debit_raw": debit,      # Store raw DR/CR from statement
-            "credit_raw": credit,    # Store raw DR/CR from statement
-            "amount_raw": debit + credit,  # Keep for compatibility
+            "description": f"{branch} {desc}",
+            "amount_raw": debit + credit,
             "balance": bal,
             "page": page_num,
         }
@@ -239,21 +188,13 @@ def parse_transactions_rhb(text, page_num, year=2025):
             continue
 
         curr_balance = parsed["balance"]
-        
-        # Check if we have raw DR/CR from Format B
-        if "debit_raw" in parsed and "credit_raw" in parsed:
-            # Use the DR/CR directly from the statement
-            debit = parsed["debit_raw"]
-            credit = parsed["credit_raw"]
+        amount = parsed["amount_raw"]
+
+        # First TX = scan method
+        if _prev_balance_global is None:
+            debit, credit = classify_first_tx(parsed["description"], amount)
         else:
-            # For Format A and C, calculate from balance change
-            amount = parsed["amount_raw"]
-            
-            # First TX = scan method
-            if _prev_balance_global is None:
-                debit, credit = classify_first_tx(parsed["description"], amount)
-            else:
-                debit, credit = compute_debit_credit(_prev_balance_global, curr_balance)
+            debit, credit = compute_debit_credit(_prev_balance_global, curr_balance)
 
         tx_list.append({
             "date": parsed["date"],
