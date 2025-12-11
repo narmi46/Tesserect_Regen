@@ -1,182 +1,230 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import pdfplumber
+import json
 import pandas as pd
 
-from banks import parse_page_by_bank, detect_bank_by_text
-from exporter import dataframe_to_ascii, dataframe_to_json
+# Import parsers
+from maybank import parse_transactions_maybank
+from public_bank import parse_transactions_pbb
+from rhb import parse_transactions_rhb
+from cimb import parse_transactions_cimb
 
 
-# -------------------------------
+# ---------------------------------------------------
 # Streamlit Setup
-# -------------------------------
-st.set_page_config(page_title="Bank Parser", layout="wide")
-st.title("📄 Bank Statement Parser (Multi-Bank)")
+# ---------------------------------------------------
+st.set_page_config(page_title="Bank Statement Parser", layout="wide")
+st.title("📄 Bank Statement Parser (Multi-File Support)")
+st.write("Upload one or more bank statement PDFs to extract transactions.")
 
 
-# -------------------------------
+# ---------------------------------------------------
 # Session State
-# -------------------------------
+# ---------------------------------------------------
 if "status" not in st.session_state:
-    st.session_state.status = "idle"
+    st.session_state.status = "idle"    # idle, running, stopped
+
 if "results" not in st.session_state:
     st.session_state.results = []
 
 
-# -------------------------------
-# Bank Selection
-# -------------------------------
-bank_choice = st.selectbox("Select Bank Format", [
-    "Auto-detect",
-    "Maybank",
-    "Public Bank (PBB)",
-    "RHB Bank",
-    "CIMB Bank",
-    "Bank Islam"
-])
-
-bank_map = {
-    "Maybank": "maybank",
-    "Public Bank (PBB)": "pbb",
-    "RHB Bank": "rhb",
-    "CIMB Bank": "cimb",
-    "Bank Islam": "bank_islam"
-}
-
-bank_hint = bank_map.get(bank_choice)  # Auto-detect = None
-
-
-# -------------------------------
-# File Upload
-# -------------------------------
-uploaded_files = st.file_uploader(
-    "Upload PDF files", type=["pdf"], accept_multiple_files=True
+# ---------------------------------------------------
+# Bank Selection Dropdown
+# ---------------------------------------------------
+bank_choice = st.selectbox(
+    "Select Bank Format",
+    ["Auto-detect", "Maybank", "Public Bank (PBB)", "RHB Bank", "CIMB Bank"]
 )
 
+bank_hint = None
+if bank_choice == "Maybank":
+    bank_hint = "maybank"
+elif bank_choice == "Public Bank (PBB)":
+    bank_hint = "pbb"
+elif bank_choice == "RHB Bank":
+    bank_hint = "rhb"
+elif bank_choice == "CIMB Bank":
+    bank_hint = "cimb"
+
+
+# ---------------------------------------------------
+# File Upload
+# ---------------------------------------------------
+uploaded_files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
 default_year = st.text_input("Default Year", "2025")
 
 
-# -------------------------------
-# Auto-detect Preview
-# -------------------------------
+# ---------------------------------------------------
+# Auto-Detect Preview (Before Start Processing)
+# ---------------------------------------------------
 if uploaded_files and bank_hint is None:
-    st.subheader("🔍 Auto-detect Preview")
+    st.subheader("🔍 Auto-Detect Preview (Before Processing)")
 
-    for f in uploaded_files:
+    for uploaded_file in uploaded_files:
         try:
-            # Save uploaded file temporarily
-            pdf_bytes = f.read()
-            f.seek(0)  # Reset for later use
-            
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            text = doc[0].get_text()
-            detected = detect_bank_by_text(text)
-            doc.close()
+            with pdfplumber.open(uploaded_file) as pdf:
+                first_page = pdf.pages[0]
+                text = first_page.extract_text() or ""
 
-            readable = {
-                "maybank": "Maybank",
-                "pbb": "Public Bank (PBB)",
-                "rhb": "RHB Bank",
-                "cimb": "CIMB Bank",
-                "bank_islam": "Bank Islam",
-                "unknown": "Unknown Format"
-            }[detected]
+                detected_bank = "Unknown"
 
-            st.info(f"📄 {f.name} → 🏦 {readable}")
+                # SIMPLE detection — matching logos/text
+                if "CIMB" in text.upper():
+                    detected_bank = "CIMB Bank"
+                elif "MAYBANK" in text.upper():
+                    detected_bank = "Maybank"
+                elif "PUBLIC BANK" in text.upper() or "PBB" in text.upper():
+                    detected_bank = "Public Bank (PBB)"
+                elif "RHB" in text.upper():
+                    detected_bank = "RHB Bank"
+
+                st.info(f"📄 **{uploaded_file.name}** → 🏦 **Detected Bank: {detected_bank}**")
 
         except Exception as e:
-            st.error(f"Preview error for {f.name}: {e}")
+            st.error(f"Error previewing {uploaded_file.name}: {e}")
 
 
-# -------------------------------
-# Controls
-# -------------------------------
+# ---------------------------------------------------
+# Start / Stop / Reset Controls
+# ---------------------------------------------------
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    if st.button("▶ Start"):
+    if st.button("▶️ Start Processing"):
         st.session_state.status = "running"
 
 with col2:
-    if st.button("⏹ Stop"):
+    if st.button("⏹️ Stop"):
         st.session_state.status = "stopped"
 
 with col3:
     if st.button("🔄 Reset"):
-        st.session_state.results = []
         st.session_state.status = "idle"
-        st.rerun()
+        st.session_state.results = []
+        st.experimental_rerun()
 
-st.write(f"### Status: **{st.session_state.status.upper()}**")
+st.write(f"### ⚙️ Status: **{st.session_state.status.upper()}**")
 
 
-# -------------------------------
-# MAIN PROCESSING LOOP
-# -------------------------------
+# ---------------------------------------------------
+# Auto-Detect Parsing Function
+# ---------------------------------------------------
+def auto_detect_and_parse(text, page_obj, page_num, default_year="2025", **source_file_kwargs):
+
+    source_file = source_file_kwargs.get("source_file", "AutoDetect")
+
+    # CIMB
+    if "CIMB" in text.upper():
+        tx = parse_transactions_cimb(page_obj, page_num, source_file)
+        if tx:
+            return tx, "CIMB Bank"
+
+    # Maybank
+    tx = parse_transactions_maybank(text, page_num, default_year)
+    if tx:
+        return tx, "Maybank"
+
+    # Public Bank
+    tx = parse_transactions_pbb(text, page_num, default_year)
+    if tx:
+        return tx, "Public Bank (PBB)"
+
+    # RHB
+    tx = parse_transactions_rhb(text, page_num)
+    if tx:
+        return tx, "RHB Bank"
+
+    return [], "Unknown"
+
+
+# ---------------------------------------------------
+# MAIN PROCESSING
+# ---------------------------------------------------
+all_tx = []
+
 if uploaded_files and st.session_state.status == "running":
 
-    live_status = st.empty()
-    collected = []
+    bank_display_box = st.empty()  # live status
 
-    for f in uploaded_files:
-        st.write(f"### Processing {f.name}")
+    for uploaded_file in uploaded_files:
+
+        st.write(f"### 🗂 Processing File: **{uploaded_file.name}**")
 
         try:
-            # Read PDF with PyMuPDF
-            pdf_bytes = f.read()
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            
-            for page_num in range(len(doc)):
-                if st.session_state.status == "stopped":
-                    st.warning("Stopped by user.")
-                    break
+            with pdfplumber.open(uploaded_file) as pdf:
 
-                page = doc[page_num]
-                text = page.get_text()
+                for page_num, page in enumerate(pdf.pages, start=1):
 
-                tx, bank_used = parse_page_by_bank(
-                    text=text,
-                    page_obj=page,
-                    page_num=page_num + 1,  # 1-indexed
-                    pdf_obj=doc,
-                    bank_hint=bank_hint,
-                    default_year=default_year,
-                    source_file=f.name
-                )
+                    if st.session_state.status == "stopped":
+                        st.warning("⏹️ Processing stopped by user.")
+                        break
 
-                live_status.info(f"🏦 Processing: {bank_used} (Page {page_num + 1})")
+                    text = page.extract_text() or ""
+                    tx = []
+                    detected_bank = "Auto"
 
-                for t in tx:
-                    t["source_file"] = f.name
-                    t["bank"] = bank_used
+                    bank_display_box.info(f"🔍 Detecting bank for Page {page_num}...")
 
-                collected.extend(tx)
-            
-            doc.close()
-            
+                    # DIRECT PARSING if bank selected
+                    if bank_hint == "maybank":
+                        detected_bank = "Maybank"
+                        tx = parse_transactions_maybank(text, page_num, default_year)
+
+                    elif bank_hint == "pbb":
+                        detected_bank = "Public Bank (PBB)"
+                        tx = parse_transactions_pbb(text, page_num, default_year)
+
+                    elif bank_hint == "rhb":
+                        detected_bank = "RHB Bank"
+                        tx = parse_transactions_rhb(text, page_num)
+
+                    elif bank_hint == "cimb":
+                        detected_bank = "CIMB Bank"
+                        tx = parse_transactions_cimb(page, page_num, uploaded_file.name)
+
+                    # AUTO-DETECT MODE
+                    else:
+                        tx, detected_bank = auto_detect_and_parse(
+                            text=text,
+                            page_obj=page,
+                            page_num=page_num,
+                            default_year=default_year,
+                            source_file=uploaded_file.name
+                        )
+
+                    bank_display_box.success(f"🏦 Processing: **{detected_bank}** (Page {page_num})")
+
+                    if tx:
+                        for t in tx:
+                            t["source_file"] = uploaded_file.name
+                            t["bank"] = detected_bank
+
+                        all_tx.extend(tx)
+
         except Exception as e:
-            st.error(f"Error processing {f.name}: {e}")
-            continue
+            st.error(f"Error processing {uploaded_file.name}: {e}")
 
-    st.session_state.results = collected
+    st.session_state.results = all_tx
 
 
-# -------------------------------
+# ---------------------------------------------------
 # DISPLAY RESULTS
-# -------------------------------
+# ---------------------------------------------------
 if st.session_state.results:
     st.subheader("📊 Extracted Transactions")
 
     df = pd.DataFrame(st.session_state.results)
+
+    expected_cols = ["date", "description", "debit", "credit", "balance", "page", "bank", "source_file"]
+    df = df[[c for c in expected_cols if c in df.columns]]
+
     st.dataframe(df, use_container_width=True)
 
-    # JSON export
-    json_data = dataframe_to_json(df)
-    st.download_button("⬇ Download JSON", json_data, "transactions.json")
+    # JSON Export
+    json_data = json.dumps(df.to_dict(orient="records"), indent=4)
+    st.download_button("⬇️ Download JSON", json_data, file_name="transactions.json", mime="application/json")
 
-    # TXT export
-    ascii_data = dataframe_to_ascii(df)
-    st.download_button("⬇ Download TXT", ascii_data, "transactions.txt")
 
 else:
     if uploaded_files:
-        st.warning("No transactions yet – press START.")
+        st.warning("⚠️ No transactions found — click **Start Processing**.")
