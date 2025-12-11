@@ -38,9 +38,9 @@ def compute_debit_credit(prev_balance, curr_balance):
     diff = round(curr_balance - prev_balance, 2)
 
     if diff > 0:
-        return 0.0, diff   # credit
+        return 0.0, diff
     elif diff < 0:
-        return abs(diff), 0.0   # debit
+        return abs(diff), 0.0
     return 0.0, 0.0
 
 
@@ -61,182 +61,143 @@ def classify_first_tx(desc, amount):
 
 
 # ============================================================
-# HELPERS FOR BALANCE-ONLY LINES (OPENING/CLOSING/BF/CF)
-# ============================================================
-
-BALANCE_KEYWORDS = [
-    "OPENING BALANCE",
-    "CLOSING BALANCE",
-    "B/F BALANCE",
-    "C/F BALANCE",
-    "BAL B/F",
-    "BAL B/F.",
-    "BAL C/F",
-    "BAL C/F.",
-    "BALANCE B/F",
-    "BALANCE C/F",
-]
-
-def is_balance_description(desc: str) -> bool:
-    if not desc:
-        return False
-    s = desc.upper()
-    return any(k in s for k in BALANCE_KEYWORDS)
-
-
-# ============================================================
 # REGEX PATTERNS FOR ALL RHB FORMATS
 # ============================================================
 
 # -------- FORMAT A (Old RHB PDF: 3 March 2024) --------
 PATTERN_TX_A = re.compile(
-    r"^(\d{1,2})([A-Za-z]{3})\s+"
-    r"(.+?)\s+"
-    r"(\d{4,20})\s+"
-    r"([0-9,]+\.\d{2})\s+"
-    r"([0-9,]+\.\d{2})"
+    r"^(\d{1,2})([A-Za-z]{3})\s+"        # 07 Mar
+    r"(.+?)\s+"                          # description
+    r"(\d{4,20})\s+"                     # serial (4–20 digits)
+    r"([0-9,]+\.\d{2})\s+"               # amount
+    r"([0-9,]+\.\d{2})"                  # balance
 )
 
-# -------- B/F & C/F BALANCE LINE (plain) --------
 PATTERN_BF_CF = re.compile(
-    r"^(\d{1,2}[A-Za-z]{3})\s+"
-    r"(B/F BALANCE|C/F BALANCE)\s+"
-    r"([0-9,]+\.\d{2})"
-    r"(?:\s*(CR|DR))?$"
+    r"^\d{1,2}[A-Za-z]{3}\s+(B/F BALANCE|C/F BALANCE)\s+([0-9,]+\.\d{2})$"
 )
 
 # -------- FORMAT B (Internet banking after export) --------
+# UPDATED: More robust pattern with proper description capture
 PATTERN_TX_B = re.compile(
-    r"(\d{2}-\d{2}-\d{4})\s+"
-    r"(\d{3})\s+"
-    r"(.+?)\s+"
-    r"([0-9,]+\.\d{2}|-)\s+"
-    r"([0-9,]+\.\d{2}|-)\s+"
-    r"([0-9,]+\.\d{2})([+-])"
+    r'(\d{2}-\d{2}-\d{4})\s+'           # Date: 05-02-2025
+    r'(\d{3})\s+'                        # Branch: 770
+    r'(.+?)\s+'                          # Description (non-greedy)
+    r'(?:([0-9,]+\.\d{2})|-)\s+'        # Amount DR or -
+    r'(?:([0-9,]+\.\d{2})|-)\s+'        # Amount CR or -
+    r'([0-9,]+\.\d{2})([+-])'           # Balance with +/- sign
 )
 
 # -------- FORMAT C (New Islamic PDF: Jan 2025) --------
 PATTERN_TX_C = re.compile(
-    r"^(\d{1,2})\s+([A-Za-z]{3})\s+"
-    r"(.+?)\s+"
-    r"(\d{4,20})\s+"
-    r"([0-9,]+\.\d{2})\s+"
-    r"([0-9,]+\.\d{2})"
+    r"^(\d{1,2})\s+([A-Za-z]{3})\s+"     # 06 Jan
+    r"(.+?)\s+"                          # description (multi-word)
+    r"(\d{4,20})\s+"                     # serial
+    r"([0-9,]+\.\d{2})\s+"               # amount
+    r"([0-9,]+\.\d{2})"                  # balance
 )
 
 
 # ============================================================
-# PARSE A SINGLE LINE (ORDER: BF_CF → C → A → B)
+# HELPER: SKIP LINES THAT ARE HEADERS/SUMMARIES
+# ============================================================
+
+def should_skip_line(line):
+    """Check if line should be skipped (headers, summaries, etc.)"""
+    skip_patterns = [
+        r'Statement Period',
+        r'Beginning Balance',
+        r'Ending Balance',
+        r'Deposits \(Plus\)',
+        r'Withdraws \(Minus\)',
+        r'Interest Paid',
+        r'TRANSACTION STATEMENT',
+        r'Date\s+Branch\s+Description',
+        r'www\.rhbgroup\.com',
+        r'For Any Enquiries',
+        r'^To$',
+        r'Deposit Account Summary',
+        r'Reflex Cash Management',
+        r'Account\s*Name',
+        r'Account\s*Number',
+    ]
+    
+    for pattern in skip_patterns:
+        if re.search(pattern, line, re.IGNORECASE):
+            return True
+    
+    # Skip lines that are just account holder names (all caps with SDN BHD etc)
+    if re.match(r'^[A-Z\s\.]+(?:SDN\.?\s*BHD\.?|SERVICES|ENTERPRISE)[\s\.]*$', line):
+        return True
+        
+    return False
+
+
+# ============================================================
+# PARSE A SINGLE LINE (TRY FORMAT C → A → B)
 # ============================================================
 
 def parse_line_rhb(line, page_num, year=2025):
+
     line = line.strip()
-    if not line:
+    if not line or should_skip_line(line):
         return None
 
-    # -------- 1) PLAIN B/F or C/F BALANCE LINES --------
-    m_bf = PATTERN_BF_CF.match(line)
-    if m_bf:
-        date_raw, bf_type, bal_raw, cr_dr = m_bf.groups()
-        day = date_raw[:-3]
-        mon = date_raw[-3:]
-        date_fmt = f"{year}-{MONTH_MAP.get(mon, '01')}-{day.zfill(2)}"
-
-        bal = float(bal_raw.replace(",", ""))
-        if cr_dr == "DR":
-            bal = -bal
-
-        return {
-            "type": "bf_cf",
-            "date": date_fmt,
-            "balance": bal,
-            "bf_type": bf_type,
-            "page": page_num,
-        }
-
-    # -------- 2) FORMAT C (New Islamic PDF) --------
+    # -------- FORMAT C: Islamic PDF (Jan 2025) --------
     mC = PATTERN_TX_C.match(line)
     if mC:
         day, mon, desc, serial, amt1, amt2 = mC.groups()
-        desc_clean = fix_description(desc)
         date_fmt = f"{year}-{MONTH_MAP.get(mon, '01')}-{day.zfill(2)}"
-        bal = float(amt2.replace(",", ""))
-
-        # If description is an opening/closing/BF/CF balance, treat as balance row only
-        if is_balance_description(desc_clean):
-            return {
-                "type": "bf_cf",
-                "date": date_fmt,
-                "balance": bal,
-                "bf_type": desc_clean,
-                "page": page_num,
-            }
-
         return {
             "type": "tx",
             "date": date_fmt,
-            "description": desc_clean,
+            "description": fix_description(desc),
             "amount_raw": float(amt1.replace(",", "")),
-            "balance": bal,
+            "balance": float(amt2.replace(",", "")),
             "page": page_num,
         }
 
-    # -------- 3) FORMAT A (Old PDF) --------
+    # -------- FORMAT A: Old RHB PDF --------
     mA = PATTERN_TX_A.match(line)
     if mA:
         day, mon, desc, serial, amt1, amt2 = mA.groups()
-        desc_clean = fix_description(desc)
         date_fmt = f"{year}-{MONTH_MAP.get(mon, '01')}-{day.zfill(2)}"
-        bal = float(amt2.replace(",", ""))
-
-        if is_balance_description(desc_clean):
-            return {
-                "type": "bf_cf",
-                "date": date_fmt,
-                "balance": bal,
-                "bf_type": desc_clean,
-                "page": page_num,
-            }
-
         return {
             "type": "tx",
             "date": date_fmt,
-            "description": desc_clean,
+            "description": fix_description(desc),
             "amount_raw": float(amt1.replace(",", "")),
-            "balance": bal,
+            "balance": float(amt2.replace(",", "")),
             "page": page_num,
         }
 
-    # -------- 4) FORMAT B (Online Export) --------
-    mB = PATTERN_TX_B.match(line)  # IMPORTANT: match(), not search()
+    # -------- B/F or C/F --------
+    if PATTERN_BF_CF.match(line):
+        return {"type": "bf_cf"}
+
+    # -------- FORMAT B: Online Banking (UPDATED) --------
+    mB = PATTERN_TX_B.search(line)
     if mB:
-        date_raw, branch, desc, dr_raw, cr_raw, bal_raw, sign = mB.groups()
+        date_raw, branch, desc, dr_raw, cr_raw, balance_raw, sign = mB.groups()
         dd, mm, yyyy = date_raw.split("-")
         date_fmt = f"{yyyy}-{mm}-{dd}"
 
-        desc_clean = fix_description(desc)
-        bal = float(bal_raw.replace(",", ""))
+        # Parse debit/credit - already provided in statement
+        debit = float(dr_raw.replace(",", "")) if dr_raw else 0.0
+        credit = float(cr_raw.replace(",", "")) if cr_raw else 0.0
+
+        # Parse balance with sign
+        bal = float(balance_raw.replace(",", ""))
         if sign == "-":
             bal = -bal
-
-        # Handle "OPENING BALANCE" / "CLOSING BALANCE" in Internet export
-        if is_balance_description(desc_clean):
-            return {
-                "type": "bf_cf",
-                "date": date_fmt,
-                "balance": bal,
-                "bf_type": desc_clean,
-                "page": page_num,
-            }
-
-        debit = float(dr_raw.replace(",", "")) if dr_raw != "-" else 0.0
-        credit = float(cr_raw.replace(",", "")) if cr_raw != "-" else 0.0
 
         return {
             "type": "tx",
             "date": date_fmt,
-            "description": f"{branch} {desc_clean}",
-            "amount_raw": debit + credit,
+            "description": fix_description(desc),
+            "debit_raw": debit,      # NEW: Store raw DR/CR from statement
+            "credit_raw": credit,    # NEW: Store raw DR/CR from statement
+            "amount_raw": debit + credit,  # Keep for compatibility
             "balance": bal,
             "page": page_num,
         }
@@ -251,7 +212,7 @@ def parse_line_rhb(line, page_num, year=2025):
 def parse_transactions_rhb(text, page_num, year=2025):
     global _prev_balance_global
 
-    # Reset when starting a new statement
+    # Restart on page 1
     if page_num == 1:
         _prev_balance_global = None
 
@@ -262,22 +223,25 @@ def parse_transactions_rhb(text, page_num, year=2025):
         if not parsed:
             continue
 
-        # -------- Handle OPENING/CLOSING/BF/CF (balance-only) --------
         if parsed["type"] == "bf_cf":
-            # Seed or sync the running balance
-            _prev_balance_global = parsed["balance"]
-            # IMPORTANT: we DO NOT add this as a transaction row
             continue
 
-        # -------- Handle REAL transactions only --------
         curr_balance = parsed["balance"]
-        amount = parsed["amount_raw"]
-
-        # First TX of statement (no previous balance captured yet)
-        if _prev_balance_global is None:
-            debit, credit = classify_first_tx(parsed["description"], amount)
+        
+        # NEW: Check if we have raw DR/CR from Format B
+        if "debit_raw" in parsed and "credit_raw" in parsed:
+            # Use the DR/CR directly from the statement
+            debit = parsed["debit_raw"]
+            credit = parsed["credit_raw"]
         else:
-            debit, credit = compute_debit_credit(_prev_balance_global, curr_balance)
+            # For Format A and C, calculate from balance change
+            amount = parsed["amount_raw"]
+            
+            # First TX = scan method
+            if _prev_balance_global is None:
+                debit, credit = classify_first_tx(parsed["description"], amount)
+            else:
+                debit, credit = compute_debit_credit(_prev_balance_global, curr_balance)
 
         tx_list.append({
             "date": parsed["date"],
