@@ -55,6 +55,10 @@ elif bank_choice == "CIMB Bank":
 uploaded_files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
 default_year = st.text_input("Default Year", "2025")
 
+# Sort uploaded files by name (assumes filenames contain dates/months)
+if uploaded_files:
+    uploaded_files = sorted(uploaded_files, key=lambda x: x.name)
+
 
 # ---------------------------------------------------
 # Auto-Detect Preview (Before Start Processing)
