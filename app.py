@@ -1,5 +1,5 @@
 import streamlit as st
-import pdfplumber
+import fitz  # PyMuPDF
 import pandas as pd
 
 from banks import parse_page_by_bank, detect_bank_by_text
@@ -63,20 +63,25 @@ if uploaded_files and bank_hint is None:
 
     for f in uploaded_files:
         try:
-            with pdfplumber.open(f) as pdf:
-                text = pdf.pages[0].extract_text() or ""
-                detected = detect_bank_by_text(text)
+            # Save uploaded file temporarily
+            pdf_bytes = f.read()
+            f.seek(0)  # Reset for later use
+            
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            text = doc[0].get_text()
+            detected = detect_bank_by_text(text)
+            doc.close()
 
-                readable = {
-                    "maybank": "Maybank",
-                    "pbb": "Public Bank (PBB)",
-                    "rhb": "RHB Bank",
-                    "cimb": "CIMB Bank",
-                    "bank_islam": "Bank Islam",
-                    "unknown": "Unknown Format"
-                }[detected]
+            readable = {
+                "maybank": "Maybank",
+                "pbb": "Public Bank (PBB)",
+                "rhb": "RHB Bank",
+                "cimb": "CIMB Bank",
+                "bank_islam": "Bank Islam",
+                "unknown": "Unknown Format"
+            }[detected]
 
-                st.info(f"📄 {f.name} → 🏦 {readable}")
+            st.info(f"📄 {f.name} → 🏦 {readable}")
 
         except Exception as e:
             st.error(f"Preview error for {f.name}: {e}")
@@ -115,32 +120,42 @@ if uploaded_files and st.session_state.status == "running":
     for f in uploaded_files:
         st.write(f"### Processing {f.name}")
 
-        with pdfplumber.open(f) as pdf:
-            for page_num, page in enumerate(pdf.pages, start=1):
-
+        try:
+            # Read PDF with PyMuPDF
+            pdf_bytes = f.read()
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            
+            for page_num in range(len(doc)):
                 if st.session_state.status == "stopped":
                     st.warning("Stopped by user.")
                     break
 
-                text = page.extract_text() or ""
+                page = doc[page_num]
+                text = page.get_text()
 
                 tx, bank_used = parse_page_by_bank(
                     text=text,
                     page_obj=page,
-                    page_num=page_num,
-                    pdf_obj=pdf,        # <-- IMPORTANT
+                    page_num=page_num + 1,  # 1-indexed
+                    pdf_obj=doc,
                     bank_hint=bank_hint,
                     default_year=default_year,
                     source_file=f.name
                 )
 
-                live_status.info(f"🏦 Processing: {bank_used} (Page {page_num})")
+                live_status.info(f"🏦 Processing: {bank_used} (Page {page_num + 1})")
 
                 for t in tx:
                     t["source_file"] = f.name
                     t["bank"] = bank_used
 
                 collected.extend(tx)
+            
+            doc.close()
+            
+        except Exception as e:
+            st.error(f"Error processing {f.name}: {e}")
+            continue
 
     st.session_state.results = collected
 
@@ -164,4 +179,4 @@ if st.session_state.results:
 
 else:
     if uploaded_files:
-        st.warning("No transactions yet — press START.")
+        st.warning("No transactions yet – press START.")
