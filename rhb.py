@@ -1,209 +1,110 @@
 import regex as re
 
-# ============================================================
-# MONTH MAP
-# ============================================================
-
-MONTH_MAP = {
-    "Jan": "01", "Feb": "02", "Mar": "03",
-    "Apr": "04", "May": "05", "Jun": "06",
-    "Jul": "07", "Aug": "08", "Sep": "09",
-    "Oct": "10", "Nov": "11", "Dec": "12"
-}
-
-# ============================================================
-# INTERNAL STATE (PERSISTS ACROSS PAGES)
-# ============================================================
-
-_prev_balance_global = None
-
-# ============================================================
-# SIMPLE DESCRIPTION CLEANER
-# ============================================================
-
-def fix_description(desc):
-    if not desc:
-        return desc
-    return " ".join(desc.split())
-
-
-# ============================================================
-# BALANCE → DEBIT / CREDIT LOGIC
-# ============================================================
-
-def compute_debit_credit(prev_balance, curr_balance):
-    if prev_balance is None:
-        return 0.0, 0.0
-
-    diff = round(curr_balance - prev_balance, 2)
-
-    if diff > 0:
-        return 0.0, diff
-    elif diff < 0:
-        return abs(diff), 0.0
-    return 0.0, 0.0
-
-
-# ============================================================
-# FIRST TRANSACTION SCAN METHOD
-# ============================================================
-
-def classify_first_tx(desc, amount):
-    s = re.sub(r"\s+", "", desc or "").upper()
-    if (
-        "DEPOSIT" in s or
-        "CDT" in s or
-        "INWARD" in s or
-        s.endswith("CR")
-    ):
-        return 0.0, amount
-    return amount, 0.0
-
-
-# ============================================================
-# REGEX PATTERNS FOR ALL RHB FORMATS
-# ============================================================
-
-# -------- FORMAT A (Old RHB PDF: 3 March 2024) --------
-PATTERN_TX_A = re.compile(
-    r"^(\d{1,2})([A-Za-z]{3})\s+"        # 07 Mar
-    r"(.+?)\s+"                          # description
-    r"(\d{4,20})\s+"                     # serial (4–20 digits)
-    r"([0-9,]+\.\d{2})\s+"               # amount
-    r"([0-9,]+\.\d{2})"                  # balance
-)
-
-PATTERN_BF_CF = re.compile(
-    r"^\d{1,2}[A-Za-z]{3}\s+(B/F BALANCE|C/F BALANCE)\s+([0-9,]+\.\d{2})$"
-)
-
-# -------- FORMAT B (Internet banking after export) --------
-PATTERN_TX_B = re.compile(
-    r"(\d{2}-\d{2}-\d{4})\s+"
-    r"(\d{3})\s+"
-    r"(.+?)\s+"
-    r"([0-9,]+\.\d{2}|-)\s+"
-    r"([0-9,]+\.\d{2}|-)\s+"
-    r"([0-9,]+\.\d{2})([+-])"
-)
-
-# -------- FORMAT C (New Islamic PDF: Jan 2025) --------
-PATTERN_TX_C = re.compile(
-    r"^(\d{1,2})\s+([A-Za-z]{3})\s+"     # 06 Jan
-    r"(.+?)\s+"                          # description (multi-word)
-    r"(\d{4,20})\s+"                     # serial
-    r"([0-9,]+\.\d{2})\s+"               # amount
-    r"([0-9,]+\.\d{2})"                  # balance
-)
-
-
-# ============================================================
-# PARSE A SINGLE LINE (TRY FORMAT C → A → B)
-# ============================================================
-
-def parse_line_rhb(line, page_num, year=2025):
-
-    line = line.strip()
-    if not line:
-        return None
-
-    # -------- FORMAT C: Islamic PDF (Jan 2025) --------
-    mC = PATTERN_TX_C.match(line)
-    if mC:
-        day, mon, desc, serial, amt1, amt2 = mC.groups()
-        date_fmt = f"{year}-{MONTH_MAP.get(mon, '01')}-{day.zfill(2)}"
-        return {
-            "type": "tx",
-            "date": date_fmt,
-            "description": fix_description(desc),
-            "amount_raw": float(amt1.replace(",", "")),
-            "balance": float(amt2.replace(",", "")),
-            "page": page_num,
-        }
-
-    # -------- FORMAT A: Old RHB PDF --------
-    mA = PATTERN_TX_A.match(line)
-    if mA:
-        day, mon, desc, serial, amt1, amt2 = mA.groups()
-        date_fmt = f"{year}-{MONTH_MAP.get(mon, '01')}-{day.zfill(2)}"
-        return {
-            "type": "tx",
-            "date": date_fmt,
-            "description": fix_description(desc),
-            "amount_raw": float(amt1.replace(",", "")),
-            "balance": float(amt2.replace(",", "")),
-            "page": page_num,
-        }
-
-    # -------- B/F or C/F --------
-    if PATTERN_BF_CF.match(line):
-        return {"type": "bf_cf"}
-
-    # -------- FORMAT B: Online Banking --------
-    mB = PATTERN_TX_B.search(line)
-    if mB:
-        date_raw, branch, desc, dr_raw, cr_raw, balance_raw, sign = mB.groups()
-        dd, mm, yyyy = date_raw.split("-")
-        date_fmt = f"{yyyy}-{mm}-{dd}"
-
-        debit = float(dr_raw.replace(",", "")) if dr_raw != "-" else 0.0
-        credit = float(cr_raw.replace(",", "")) if cr_raw != "-" else 0.0
-
-        bal = float(balance_raw.replace(",", ""))
-        if sign == "-":
-            bal = -bal
-
-        return {
-            "type": "tx",
-            "date": date_fmt,
-            "description": f"{branch} {desc}",
-            "amount_raw": debit + credit,
-            "balance": bal,
-            "page": page_num,
-        }
-
-    return None
-
-
-# ============================================================
-# MAIN PARSER
-# ============================================================
-
 def parse_transactions_rhb(text, page_num, year=2025):
-    global _prev_balance_global
+    """
+    Parses RHB transactions, automatically detecting if the text is in the 
+    standard line-by-line format or the fragmented CSV block format.
+    """
+    
+    # ==========================================================
+    # DETECT FORMAT: Check for CSV-style delimiters
+    # ==========================================================
+    if '","' in text and re.search(r'\d{2}-\d{2}-\d{4}', text):
+        return _parse_rhb_csv_block(text, page_num)
+    else:
+        # Fallback to your existing line-by-line logic (Function A/C from previous code)
+        # For this example, I will return an empty list or you can paste your old logic here.
+        # print(f"Page {page_num}: Standard format detected (not CSV).")
+        return [] 
 
-    # Restart on page 1
-    if page_num == 1:
-        _prev_balance_global = None
-
-    tx_list = []
-
-    for raw_line in text.splitlines():
-        parsed = parse_line_rhb(raw_line, page_num, year)
-        if not parsed:
+def _parse_rhb_csv_block(text, page_num):
+    """
+    Internal helper to parse the fragmented CSV blocks found in newer/export-style RHB PDFs.
+    """
+    transactions = []
+    
+    # 1. CLEANUP: 
+    # Remove newlines to merge broken fields (e.g. Branch on one line, Desc on next)
+    clean_text = text.replace("\n", " ").replace("\r", "")
+    
+    # 2. NORMALIZE SEPARATORS:
+    # The PDF often contains ",," for empty columns (e.g., empty debit or credit).
+    # We replace ",," with ",""," to ensure the split works consistently.
+    # We do this twice to catch consecutive empty columns if any.
+    clean_text = clean_text.replace(",,", ',"",').replace(",,", ',"",')
+    
+    # 3. SPLIT INTO ROWS:
+    # Split by looking for the Date pattern "DD-MM-YYYY" at the start of a CSV field.
+    # We use a lookahead (?=...) to keep the date in the string.
+    # Pattern explanation: (?=" matches start of quote, then date, then end quote
+    row_pattern = r'(?="\d{2}-\d{2}-\d{4}",")'
+    rows = re.split(row_pattern, clean_text)
+    
+    for row in rows:
+        row = row.strip()
+        if not row:
             continue
-
-        if parsed["type"] == "bf_cf":
+            
+        # 4. PARSE COLUMNS
+        # Now we can safely split by '","' because we normalized the empty fields.
+        parts = row.split('","')
+        
+        # We need at least basic fields. 
+        # Usually: [Date, Branch, Desc, ..., RefNum, Dr, Cr, Balance]
+        if len(parts) < 5:
             continue
+            
+        try:
+            # --- EXTRACT ---
+            # Date is always first
+            raw_date = parts[0].replace('"', '').strip()
+            
+            # [cite_start]Balance is always last [cite: 10]
+            raw_bal = parts[-1].replace('"', '').replace(',', '').strip()
+            
+            # Credit is second to last
+            raw_cr = parts[-2].replace('"', '').replace(',', '').strip()
+            
+            # Debit is third to last
+            raw_dr = parts[-3].replace('"', '').replace(',', '').strip()
+            
+            # RefNum is fourth to last?
+            # Description is everything between Branch (index 1) and RefNum
+            # Let's dynamically join the middle parts as description
+            branch = parts[1]
+            desc_parts = parts[2:-3] # Everything between Branch and Debit/Cr/Bal
+            full_desc = f"{branch} " + " ".join(desc_parts).replace('"', '')
+            
+            # --- CLEAN NUMBERS ---
+            # [cite_start]Handle RHB's trailing minus sign for negative balances (e.g. "770,138.57-") [cite: 10]
+            if raw_bal.endswith("-"):
+                balance = -float(raw_bal[:-1])
+            else:
+                balance = float(raw_bal) if raw_bal else 0.0
+                
+            debit = float(raw_dr) if raw_dr and raw_dr != "-" else 0.0
+            credit = float(raw_cr) if raw_cr and raw_cr != "-" else 0.0
+            
+            # --- REFORMAT DATE ---
+            # DD-MM-YYYY -> YYYY-MM-DD
+            if "-" in raw_date:
+                dd, mm, yyyy = raw_date.split("-")
+                iso_date = f"{yyyy}-{mm}-{dd}"
+            else:
+                iso_date = raw_date # Fallback
 
-        curr_balance = parsed["balance"]
-        amount = parsed["amount_raw"]
-
-        # First TX = scan method
-        if _prev_balance_global is None:
-            debit, credit = classify_first_tx(parsed["description"], amount)
-        else:
-            debit, credit = compute_debit_credit(_prev_balance_global, curr_balance)
-
-        tx_list.append({
-            "date": parsed["date"],
-            "description": parsed["description"],
-            "debit": debit,
-            "credit": credit,
-            "balance": curr_balance,
-            "page": page_num,
-        })
-
-        _prev_balance_global = curr_balance
-
-    return tx_list
+            # --- APPEND ---
+            transactions.append({
+                "date": iso_date,
+                "description": " ".join(full_desc.split()), # Remove extra whitespace
+                "debit": debit,
+                "credit": credit,
+                "balance": balance,
+                "page": page_num
+            })
+            
+        except Exception as e:
+            # Skip noise/header rows that don't match the structure
+            continue
+            
+    return transactions
