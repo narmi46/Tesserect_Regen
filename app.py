@@ -5,13 +5,11 @@ import pandas as pd
 from banks import parse_page_by_bank, detect_bank_by_text
 from exporter import dataframe_to_ascii, dataframe_to_json
 
-
 # -------------------------------
 # Streamlit Setup
 # -------------------------------
 st.set_page_config(page_title="Bank Parser", layout="wide")
 st.title("📄 Bank Statement Parser (Multi-Bank)")
-
 
 # -------------------------------
 # Session State
@@ -20,7 +18,6 @@ if "status" not in st.session_state:
     st.session_state.status = "idle"
 if "results" not in st.session_state:
     st.session_state.results = []
-
 
 # -------------------------------
 # Bank Selection
@@ -42,8 +39,7 @@ bank_map = {
     "Bank Islam": "bank_islam"
 }
 
-bank_hint = bank_map.get(bank_choice)  # Auto-detect = None
-
+bank_hint = bank_map.get(bank_choice)
 
 # -------------------------------
 # File Upload
@@ -53,7 +49,6 @@ uploaded_files = st.file_uploader(
 )
 
 default_year = st.text_input("Default Year", "2025")
-
 
 # -------------------------------
 # Auto-detect Preview
@@ -81,7 +76,6 @@ if uploaded_files and bank_hint is None:
         except Exception as e:
             st.error(f"Preview error for {f.name}: {e}")
 
-
 # -------------------------------
 # Controls
 # -------------------------------
@@ -103,7 +97,6 @@ with col3:
 
 st.write(f"### Status: **{st.session_state.status.upper()}**")
 
-
 # -------------------------------
 # MAIN PROCESSING LOOP
 # -------------------------------
@@ -114,6 +107,9 @@ if uploaded_files and st.session_state.status == "running":
 
     for f in uploaded_files:
         st.write(f"### Processing {f.name}")
+
+        raw_bytes = f.read()         # ← IMPORTANT
+        f.seek(0)                    # reset pointer for pdfplumber
 
         with pdfplumber.open(f) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
@@ -128,7 +124,7 @@ if uploaded_files and st.session_state.status == "running":
                     text=text,
                     page_obj=page,
                     page_num=page_num,
-                    pdf_obj=pdf,        # <-- IMPORTANT
+                    pdf_obj=raw_bytes,       # ← WE PASS BYTES HERE
                     bank_hint=bank_hint,
                     default_year=default_year,
                     source_file=f.name
@@ -144,7 +140,6 @@ if uploaded_files and st.session_state.status == "running":
 
     st.session_state.results = collected
 
-
 # -------------------------------
 # DISPLAY RESULTS
 # -------------------------------
@@ -154,11 +149,9 @@ if st.session_state.results:
     df = pd.DataFrame(st.session_state.results)
     st.dataframe(df, use_container_width=True)
 
-    # JSON export
     json_data = dataframe_to_json(df)
     st.download_button("⬇ Download JSON", json_data, "transactions.json")
 
-    # TXT export
     ascii_data = dataframe_to_ascii(df)
     st.download_button("⬇ Download TXT", ascii_data, "transactions.txt")
 
