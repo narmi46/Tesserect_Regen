@@ -4,6 +4,7 @@ import json
 import pandas as pd
 from datetime import datetime
 from io import BytesIO
+import re
 
 # Import parsers
 from maybank import parse_transactions_maybank
@@ -61,6 +62,103 @@ if uploaded_files:
 
 
 # ---------------------------------------------------
+# Helper: Extract Statement Month from PDF
+# ---------------------------------------------------
+def extract_statement_month(pdf, filename):
+    """
+    Extract the statement month/year from the PDF header or filename.
+    Returns tuple: (year, month) or None
+    """
+    try:
+        # Try to extract from first page
+        first_page = pdf.pages[0]
+        text = first_page.extract_text() or ""
+        
+        # Common patterns in bank statements
+        # Pattern 1: "Statement Date: 01 Jan 2025" or "Statement Period: Jan 2025"
+        patterns = [
+            r'Statement\s+(?:Date|Period)[:\s]+(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})',
+            r'Statement\s+(?:Date|Period)[:\s]+([A-Za-z]+)\s+(\d{4})',
+            r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\s+to\s+\d{1,2}\s+[A-Za-z]+\s+\d{4}',
+            r'([A-Za-z]+)\s+(\d{4})',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                groups = match.groups()
+                
+                # Handle different match formats
+                if len(groups) == 3:
+                    # Has day, month, year
+                    month_str = groups[1]
+                    year = int(groups[2])
+                elif len(groups) == 2:
+                    # Has month, year
+                    month_str = groups[0]
+                    year = int(groups[1])
+                else:
+                    continue
+                
+                # Convert month name to number
+                month_map = {
+                    'jan': 1, 'january': 1,
+                    'feb': 2, 'february': 2,
+                    'mar': 3, 'march': 3,
+                    'apr': 4, 'april': 4,
+                    'may': 5,
+                    'jun': 6, 'june': 6,
+                    'jul': 7, 'july': 7,
+                    'aug': 8, 'august': 8,
+                    'sep': 9, 'sept': 9, 'september': 9,
+                    'oct': 10, 'october': 10,
+                    'nov': 11, 'november': 11,
+                    'dec': 12, 'december': 12
+                }
+                
+                month = month_map.get(month_str.lower()[:3])
+                if month:
+                    return (year, month)
+        
+        # Try to extract from filename as fallback
+        # e.g., "statement_jan_2025.pdf" or "2025-01.pdf"
+        filename_patterns = [
+            r'(\d{4})[_-](\d{1,2})',  # 2025-01 or 2025_1
+            r'([a-z]+)[_-](\d{4})',    # jan_2025
+            r'(\d{4})[_-]([a-z]+)',    # 2025_jan
+        ]
+        
+        for pattern in filename_patterns:
+            match = re.search(pattern, filename.lower())
+            if match:
+                g1, g2 = match.groups()
+                
+                # Try to determine which is year and which is month
+                if g1.isdigit() and len(g1) == 4:
+                    year = int(g1)
+                    if g2.isdigit():
+                        month = int(g2)
+                    else:
+                        month = month_map.get(g2[:3])
+                elif g2.isdigit() and len(g2) == 4:
+                    year = int(g2)
+                    if g1.isdigit():
+                        month = int(g1)
+                    else:
+                        month = month_map.get(g1[:3])
+                else:
+                    continue
+                
+                if month and 1 <= month <= 12:
+                    return (year, month)
+    
+    except Exception as e:
+        st.warning(f"Could not extract statement month: {e}")
+    
+    return None
+
+
+# ---------------------------------------------------
 # Auto-Detect Preview (Before Start Processing)
 # ---------------------------------------------------
 if uploaded_files and bank_hint is None:
@@ -83,8 +181,12 @@ if uploaded_files and bank_hint is None:
                     detected_bank = "Public Bank (PBB)"
                 elif "RHB" in text.upper():
                     detected_bank = "RHB Bank"
+                
+                # Extract statement month
+                statement_month = extract_statement_month(pdf, uploaded_file.name)
+                month_info = f" | Statement: {statement_month[0]}-{statement_month[1]:02d}" if statement_month else ""
 
-                st.info(f"📄 **{uploaded_file.name}** → 🏦 **Detected Bank: {detected_bank}**")
+                st.info(f"📄 **{uploaded_file.name}** → 🏦 **Detected Bank: {detected_bank}**{month_info}")
 
         except Exception as e:
             st.error(f"Error previewing {uploaded_file.name}: {e}")
@@ -158,6 +260,11 @@ if uploaded_files and st.session_state.status == "running":
 
         try:
             with pdfplumber.open(uploaded_file) as pdf:
+                
+                # Extract statement month for this file
+                statement_month = extract_statement_month(pdf, uploaded_file.name)
+                if statement_month:
+                    st.success(f"📅 Statement Period: {statement_month[0]}-{statement_month[1]:02d}")
 
                 for page_num, page in enumerate(pdf.pages, start=1):
 
@@ -204,6 +311,11 @@ if uploaded_files and st.session_state.status == "running":
                         for t in tx:
                             t["source_file"] = uploaded_file.name
                             t["bank"] = detected_bank
+                            
+                            # Add statement month metadata if available
+                            if statement_month:
+                                t["statement_year"] = statement_month[0]
+                                t["statement_month"] = statement_month[1]
 
                         all_tx.extend(tx)
 
@@ -214,7 +326,7 @@ if uploaded_files and st.session_state.status == "running":
 
 
 # ---------------------------------------------------
-# CALCULATE MONTHLY SUMMARY
+# CALCULATE MONTHLY SUMMARY - IMPROVED VERSION
 # ---------------------------------------------------
 def calculate_monthly_summary(transactions):
     if not transactions:
@@ -222,12 +334,29 @@ def calculate_monthly_summary(transactions):
     
     df = pd.DataFrame(transactions)
     
-    # Parse dates
-    df['date_parsed'] = pd.to_datetime(df['date'], errors='coerce')
-    df = df.dropna(subset=['date_parsed'])
+    # First, try to use statement_year and statement_month if available
+    has_statement_metadata = 'statement_year' in df.columns and 'statement_month' in df.columns
     
-    # Extract year-month
-    df['year_month'] = df['date_parsed'].dt.to_period('M')
+    if has_statement_metadata:
+        # Use the statement metadata for grouping
+        df['year_month'] = df.apply(
+            lambda row: pd.Period(year=int(row['statement_year']), 
+                                 month=int(row['statement_month']), 
+                                 freq='M') if pd.notna(row.get('statement_year')) else None,
+            axis=1
+        )
+    else:
+        # Fallback to parsing dates from transactions
+        df['date_parsed'] = pd.to_datetime(df['date'], errors='coerce')
+        df = df.dropna(subset=['date_parsed'])
+        df['year_month'] = df['date_parsed'].dt.to_period('M')
+    
+    # Remove rows without valid year_month
+    df = df.dropna(subset=['year_month'])
+    
+    if df.empty:
+        st.warning("⚠️ No valid dates found in transactions. Check date format in parser outputs.")
+        return []
     
     # Convert debit, credit, balance to float
     df['debit'] = pd.to_numeric(df['debit'], errors='coerce').fillna(0)
@@ -241,9 +370,11 @@ def calculate_monthly_summary(transactions):
             'month': str(ym),
             'total_debit': round(group['debit'].sum(), 2),
             'total_credit': round(group['credit'].sum(), 2),
+            'net_change': round(group['credit'].sum() - group['debit'].sum(), 2),
             'lowest_balance': round(group['balance'].min(), 2) if not group['balance'].isna().all() else None,
             'highest_balance': round(group['balance'].max(), 2) if not group['balance'].isna().all() else None,
-            'transaction_count': len(group)
+            'transaction_count': len(group),
+            'source_files': ', '.join(group['source_file'].unique()) if 'source_file' in group.columns else ''
         }
         monthly_summary.append(summary)
     
@@ -259,6 +390,10 @@ if st.session_state.results:
     df = pd.DataFrame(st.session_state.results)
 
     expected_cols = ["date", "description", "debit", "credit", "balance", "page", "bank", "source_file"]
+    # Add statement metadata columns if they exist
+    if 'statement_year' in df.columns:
+        expected_cols.extend(['statement_year', 'statement_month'])
+    
     df = df[[c for c in expected_cols if c in df.columns]]
 
     st.dataframe(df, use_container_width=True)
@@ -270,6 +405,8 @@ if st.session_state.results:
         st.subheader("📅 Monthly Summary")
         summary_df = pd.DataFrame(monthly_summary)
         st.dataframe(summary_df, use_container_width=True)
+    else:
+        st.warning("⚠️ Could not generate monthly summary. Please check if dates are being extracted correctly.")
 
     # JSON Export - Transactions Only
     st.subheader("⬇️ Download Options")
