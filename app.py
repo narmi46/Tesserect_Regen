@@ -296,20 +296,23 @@ if st.session_state.results:
     
     with col3:
         # Excel Export - Full Report with Multiple Sheets
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='Transactions', index=False)
-            if monthly_summary:
-                summary_df = pd.DataFrame(monthly_summary)
-                summary_df.to_excel(writer, sheet_name='Monthly Summary', index=False)
-        
-        excel_data = output.getvalue()
-        st.download_button(
-            "📊 Download Full Report (XLSX)", 
-            excel_data, 
-            file_name="full_report.xlsx", 
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        try:
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, sheet_name='Transactions', index=False)
+                if monthly_summary:
+                    summary_df = pd.DataFrame(monthly_summary)
+                    summary_df.to_excel(writer, sheet_name='Monthly Summary', index=False)
+            
+            excel_data = output.getvalue()
+            st.download_button(
+                "📊 Download Full Report (XLSX)", 
+                excel_data, 
+                file_name="full_report.xlsx", 
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except ImportError:
+            st.error("⚠️ xlsxwriter package not installed. Install with: pip install xlsxwriter")
 
 else:
     if uploaded_files:
