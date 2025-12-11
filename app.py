@@ -215,12 +215,8 @@ st.write(f"### ⚙️ Status: **{st.session_state.status.upper()}**")
 # Auto-Detect Parsing Function
 # ---------------------------------------------------
 def auto_detect_and_parse(text, page_obj, page_num, default_year="2025", **source_file_kwargs):
-    """Auto-detect bank and parse transactions"""
-    
+
     source_file = source_file_kwargs.get("source_file", "AutoDetect")
-    
-    # Convert default_year to int
-    year_int = int(default_year) if isinstance(default_year, str) else default_year
 
     # CIMB
     if "CIMB" in text.upper():
@@ -238,8 +234,8 @@ def auto_detect_and_parse(text, page_obj, page_num, default_year="2025", **sourc
     if tx:
         return tx, "Public Bank (PBB)"
 
-    # RHB - FIXED: Pass year parameter
-    tx = parse_transactions_rhb(text, page_num, year_int)
+    # RHB
+    tx = parse_transactions_rhb(text, page_num)
     if tx:
         return tx, "RHB Bank"
 
@@ -281,9 +277,6 @@ if uploaded_files and st.session_state.status == "running":
 
                     bank_display_box.info(f"🔍 Detecting bank for Page {page_num}...")
 
-                    # Determine year to use
-                    year_to_use = statement_month[0] if statement_month else int(default_year)
-
                     # DIRECT PARSING if bank selected
                     if bank_hint == "maybank":
                         detected_bank = "Maybank"
@@ -295,7 +288,7 @@ if uploaded_files and st.session_state.status == "running":
 
                     elif bank_hint == "rhb":
                         detected_bank = "RHB Bank"
-                        tx = parse_transactions_rhb(text, page_num, year_to_use)
+                        tx = parse_transactions_rhb(text, page_num)
 
                     elif bank_hint == "cimb":
                         detected_bank = "CIMB Bank"
@@ -307,7 +300,7 @@ if uploaded_files and st.session_state.status == "running":
                             text=text,
                             page_obj=page,
                             page_num=page_num,
-                            default_year=str(year_to_use),
+                            default_year=default_year,
                             source_file=uploaded_file.name
                         )
 
