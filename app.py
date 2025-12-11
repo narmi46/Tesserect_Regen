@@ -107,6 +107,7 @@ st.write(f"### Status: **{st.session_state.status.upper()}**")
 # -------------------------------
 # MAIN PROCESSING LOOP
 # -------------------------------
+
 if uploaded_files and st.session_state.status == "running":
 
     live_status = st.empty()
@@ -114,6 +115,10 @@ if uploaded_files and st.session_state.status == "running":
 
     for f in uploaded_files:
         st.write(f"### Processing {f.name}")
+
+        # ⭐ FIX 1: get raw bytes BEFORE pdfplumber touches the file
+        pdf_bytes = f.read()
+        f.seek(0)  # reset pointer so pdfplumber can read too
 
         with pdfplumber.open(f) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
@@ -124,11 +129,13 @@ if uploaded_files and st.session_state.status == "running":
 
                 text = page.extract_text() or ""
 
+                # ⭐ FIX 2: pass pdf_bytes into the parser
                 tx, bank_used = parse_page_by_bank(
                     text=text,
                     page_obj=page,
                     page_num=page_num,
-                    pdf_obj=f,
+                    pdf_obj=pdf,            # still needed for non-PBB banks
+                    pdf_bytes=pdf_bytes,     # <-- REQUIRED for Public Bank
                     bank_hint=bank_hint,
                     default_year=default_year,
                     source_file=f.name
@@ -143,7 +150,6 @@ if uploaded_files and st.session_state.status == "running":
                 collected.extend(tx)
 
     st.session_state.results = collected
-
 
 # -------------------------------
 # DISPLAY RESULTS
