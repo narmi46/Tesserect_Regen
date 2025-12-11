@@ -3,6 +3,7 @@ import pdfplumber
 import json
 import pandas as pd
 from datetime import datetime
+from io import BytesIO
 
 # Import parsers
 from maybank import parse_transactions_maybank
@@ -268,7 +269,7 @@ if st.session_state.results:
 
     # JSON Export - Transactions Only
     st.subheader("⬇️ Download Options")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         json_transactions = json.dumps(df.to_dict(orient="records"), indent=4)
@@ -291,6 +292,23 @@ if st.session_state.results:
             json_full_report, 
             file_name="full_report.json", 
             mime="application/json"
+        )
+    
+    with col3:
+        # Excel Export - Full Report with Multiple Sheets
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Transactions', index=False)
+            if monthly_summary:
+                summary_df = pd.DataFrame(monthly_summary)
+                summary_df.to_excel(writer, sheet_name='Monthly Summary', index=False)
+        
+        excel_data = output.getvalue()
+        st.download_button(
+            "📊 Download Full Report (XLSX)", 
+            excel_data, 
+            file_name="full_report.xlsx", 
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
 else:
