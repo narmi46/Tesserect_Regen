@@ -1,32 +1,27 @@
 import fitz
 import re
 
-DATE_RE = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b")
-AMOUNT_RE = re.compile(r"\d[\d,]*\.\d{2}")
-
-def clean_amount(value):
-    if not value:
-        return 0.0
-    return float(value.replace(",", "").strip())
-
-
 def parse_bank_islam(path):
-    doc = fitz.open(path)
+    # Allow both filename & bytes
+    if isinstance(path, (bytes, bytearray)):
+        doc = fitz.open(stream=path, filetype="pdf")
+    else:
+        doc = fitz.open(path)
+
     transactions = []
     current = None
+    DATE_RE = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b")
+    AMOUNT_RE = re.compile(r"\d[\d,]*\.\d{2}")
 
     for page in doc:
-        blocks = page.get_text("blocks")  # (x0,y0,x1,y1,text, block_no)
-        blocks = sorted(blocks, key=lambda b: (b[1], b[0]))  # sort by y then x
+        blocks = page.get_text("blocks")
+        blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
 
-        for b in blocks:
-            text = b[4].strip()
-
-            # Try find date in block
+        for blk in blocks:
+            text = blk[4].strip()
             dmatch = DATE_RE.search(text)
 
             if dmatch:
-                # Flush previous row
                 if current:
                     transactions.append(current)
 
@@ -36,43 +31,33 @@ def parse_bank_islam(path):
                     yyyy = "20" + yyyy
                 date_fmt = f"{yyyy}-{mm}-{dd}"
 
-                # Extract amounts from rightmost side
-                amounts = AMOUNT_RE.findall(text)
-                amounts = [clean_amount(a) for a in amounts]
+                amounts = [a.replace(",", "") for a in AMOUNT_RE.findall(text)]
+                amounts = [float(a) for a in amounts]
 
                 debit = credit = balance = 0.0
                 if len(amounts) >= 3:
                     debit, credit, balance = amounts[-3:]
                 elif len(amounts) == 2:
-                    # debit/credit missing (detect automatically)
-                    if "DR" in text.upper():
-                        debit, balance = amounts
-                    else:
-                        credit, balance = amounts
+                    credit, balance = amounts
                 elif len(amounts) == 1:
                     balance = amounts[0]
 
-                # Remove date + amounts → description
-                desc = text
-                desc = desc.replace(date_raw, "")
+                desc = text.replace(date_raw, "")
                 for a in AMOUNT_RE.findall(text):
                     desc = desc.replace(a, "")
-                desc = " ".join(desc.split()).strip()
+                desc = " ".join(desc.split())
 
                 current = {
                     "date": date_fmt,
                     "description": desc,
                     "debit": debit,
                     "credit": credit,
-                    "balance": balance
+                    "balance": balance,
                 }
-
             else:
-                # Continuation of description
                 if current:
                     current["description"] += " " + text
 
-    # Add last row
     if current:
         transactions.append(current)
 
