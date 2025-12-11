@@ -1,104 +1,154 @@
 import re
-import fitz
 
+# ---------------------------------------------------------
+# Regex Patterns
+# ---------------------------------------------------------
+# Matches date at start of line: "05/06 ..."
+DATE_LINE = re.compile(r"^(?P<date>\d{2}/\d{2})\s+(?P<rest>.*)$")
 
-DATE_PATTERN = re.compile(r"^(?P<date>\d{2}/\d{2})\b")
-AMOUNT_BAL = re.compile(
-    r"(?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$"
-)
+# Matches amount + balance at end of line: "1,200.00 45,000.00"
+AMOUNT_BAL = re.compile(r"(?P<amount>\d{1,3}(?:,\d{3})*\.\d{2})\s+(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$")
 
-IGNORE_PREFIXES = [
-    "PUBLIC BANK", "PUBLIC ISLAMIC BANK", "STATEMENT", "PENYATA",
-    "SUMMARY", "RINGKASAN", "ACCOUNT", "NOMBOR", "MUKA",
-    "PAGE", "URUS", "URUS NIAGA", "TRANSACTION", "TEL:",
+# Matches "Balance B/F" lines (updates tracking, but does not create a transaction row)
+BAL_ONLY = re.compile(r"^(?P<date>\d{2}/\d{2})\s+(Balance.*)\s+(?P<balance>\d{1,3}(?:,\d{3})*\.\d{2})$", re.IGNORECASE)
+
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+# Keywords that indicate the start of a transaction
+TX_KEYWORDS = [
+    "TSFR", "DUITNOW", "GIRO", "JOMPAY", "RMT", "DR-ECP",
+    "HANDLING", "FEE", "DEP", "RTN", "PROFIT", "AUTOMATED",
+    "CHARGES", "DEBIT", "CREDIT"
 ]
 
+# Metadata/Header lines to ignore
+IGNORE_PREFIXES = [
+    "CLEAR WATER", "/ROC", "PVCWS", "2025", "IMEPS", 
+    "PUBLIC BANK", "PAGE", "TEL:", "MUKA SURAT", "TARIKH", 
+    "DATE", "NO.", "URUS NIAGA"
+]
 
-def extract_blocks(doc):
-    blocks = []
-    for page_num, page in enumerate(doc, start=1):
-        for b in page.get_text("blocks"):
-            x0, y0, x1, y1, text, *_ = b
-            text = text.strip()
-            if text:
-                blocks.append({"page": page_num, "x": x0, "y": y0, "text": text})
-    return blocks
+# ---------------------------------------------------------
+# Main Logic
+# ---------------------------------------------------------
+def parse_transactions_pbb(text, page, year="2025"):
+    tx = []
+    current_date = None
+    prev_balance = None
+    
+    # State holders
+    desc_accum = ""
+    waiting_for_amount = False
+    
+    def is_ignored(line):
+        return any(line.upper().startswith(p) for p in IGNORE_PREFIXES)
 
+    def is_tx_start(line):
+        return any(line.startswith(k) for k in TX_KEYWORDS)
 
-def group_rows(blocks, tolerance=3):
-    rows = []
-    cur, last_y = [], None
+    lines = text.splitlines()
+    
+    for line in lines:
+        line = line.strip()
+        if not line or is_ignored(line):
+            continue
 
-    blocks = sorted(blocks, key=lambda b: (b["page"], b["y"], b["x"]))
-
-    for b in blocks:
-        if last_y is None or abs(b["y"] - last_y) < tolerance:
-            cur.append(b)
-        else:
-            rows.append(cur)
-            cur = [b]
-        last_y = b["y"]
-
-    if cur:
-        rows.append(cur)
-
-    return rows
-
-
-def join_row(row):
-    return " ".join(b["text"] for b in sorted(row, key=lambda b: b["x"]))
-
-
-def parse_transactions_pbb(doc, year="2025"):
-
-    blocks = extract_blocks(doc)
-    grouped = group_rows(blocks)
-
-    rows = []
-    for r in grouped:
-        line = join_row(r)
-        if not any(line.upper().startswith(p) for p in IGNORE_PREFIXES):
-            rows.append(line)
-
-    tx, desc, current_date, prev_balance = [], "", None, None
-
-    for line in rows:
-
-        date_match = DATE_PATTERN.match(line)
+        # 1. Check for Amounts FIRST
         amount_match = AMOUNT_BAL.search(line)
-
-        if date_match:
-            current_date = date_match.group("date")
-            desc = line[len(current_date):].strip()
+        has_amount = bool(amount_match)
+        
+        # 2. Check for Start of New Transaction (Date or Keyword)
+        date_match = DATE_LINE.match(line)
+        keyword_match = is_tx_start(line)
+        is_new_start = date_match or keyword_match
+        
+        # 3. SPECIAL CASE: Balance B/F (Update tracking only)
+        bal_match = BAL_ONLY.match(line)
+        if bal_match:
+            current_date = bal_match.group("date")
+            prev_balance = float(bal_match.group("balance").replace(",", ""))
+            desc_accum = ""
+            waiting_for_amount = False 
             continue
 
-        if not amount_match:
-            desc += " " + line.strip()
-            continue
+        # -------------------------------------------------------
+        # LOGIC BRANCHING
+        # -------------------------------------------------------
+        
+        # CASE A: Line HAS amounts
+        if has_amount:
+            # Extract numbers
+            amount = float(amount_match.group("amount").replace(",", ""))
+            balance = float(amount_match.group("balance").replace(",", ""))
+            
+            # Identify if this is a NEW single-line transaction or Continuation
+            if is_new_start:
+                if date_match:
+                    current_date = date_match.group("date")
+                    line_desc = date_match.group("rest")
+                else:
+                    # Remove amount from line to get clean description
+                    line_desc = line.replace(amount_match.group(0), "").strip()
+                
+                final_desc = line_desc
+            else:
+                # Merge with accumulated description
+                final_desc = desc_accum + " " + line.replace(amount_match.group(0), "").strip()
 
-        amount = float(amount_match.group("amount").replace(",", ""))
-        balance = float(amount_match.group("balance").replace(",", ""))
+            # Determine Debit vs Credit
+            debit = 0.0
+            credit = 0.0
+            
+            if prev_balance is not None:
+                if balance < prev_balance:
+                    debit = amount
+                elif balance > prev_balance:
+                    credit = amount
+            else:
+                # Fallback if first item on page
+                if "CR" in final_desc.upper() or "DEP" in final_desc.upper():
+                    credit = amount
+                else:
+                    debit = amount
 
-        debit = credit = 0.0
-        if prev_balance is not None:
-            debit = amount if balance < prev_balance else 0.0
-            credit = amount if balance > prev_balance else 0.0
-        else:
-            credit = amount if "CR" in desc.upper() else 0.0
-            debit = amount if credit == 0 else 0.0
+            # Date Formatting
+            if current_date:
+                dd, mm = current_date.split("/")
+                iso = f"{year}-{mm}-{dd}"
+            else:
+                iso = f"{year}-01-01"
 
-        dd, mm = current_date.split("/")
-        iso = f"{year}-{mm}-{dd}"
+            # APPEND TO LIST IMMEDIATELY (Preserves Order)
+            tx.append({
+                "date": iso,
+                "description": final_desc.strip(),
+                "debit": debit,
+                "credit": credit,
+                "balance": balance,
+                "page": page,
+                "source_file": "test.pdf"
+            })
+            
+            # Reset State
+            prev_balance = balance
+            desc_accum = ""
+            waiting_for_amount = False
 
-        tx.append({
-            "date": iso,
-            "description": desc.strip(),
-            "debit": debit,
-            "credit": credit,
-            "balance": balance
-        })
+        # CASE B: No amounts, but STARTS a new transaction
+        elif is_new_start:
+            if date_match:
+                current_date = date_match.group("date")
+                desc_accum = date_match.group("rest")
+            else:
+                desc_accum = line
+            
+            waiting_for_amount = True
 
-        prev_balance = balance
-        desc = ""
+        # CASE C: Continuation text
+        elif waiting_for_amount:
+            desc_accum += " " + line
 
+    # No sorting is applied. 
+    # The list 'tx' is returned exactly in the order the lines were processed.
     return tx
