@@ -46,7 +46,7 @@ def parse_page_by_bank(
         return parse_transactions_maybank(text, page_num, default_year), "Maybank"
 
     if bank_hint == "pbb":
-        return parse_transactions_pbb(text, page_num, default_year), "Public Bank (PBB)"
+        return parse_transactions_pbb(pdf_obj), "Public Bank (PBB)"
 
     if bank_hint == "rhb":
         return parse_transactions_rhb(text, page_num), "RHB Bank"
@@ -69,7 +69,7 @@ def parse_page_by_bank(
         return parse_transactions_maybank(text, page_num, default_year), "Maybank"
 
     if detected == "pbb":
-        return parse_transactions_pbb(text, page_num, default_year), "Public Bank (PBB)"
+        return parse_transactions_pbb(pdf_obj), "Public Bank (PBB)"
 
     if detected == "rhb":
         return parse_transactions_rhb(text, page_num), "RHB Bank"
