@@ -1,110 +1,151 @@
 import regex as re
+from datetime import datetime
 
-def parse_transactions_rhb(text, page_num, year=2025):
+def parse_transactions_rhb(text, page_num, year=2024):
     """
-    Parses RHB transactions, automatically detecting if the text is in the 
-    standard line-by-line format or the fragmented CSV block format.
-    """
-    
-    # ==========================================================
-    # DETECT FORMAT: Check for CSV-style delimiters
-    # ==========================================================
-    if '","' in text and re.search(r'\d{2}-\d{2}-\d{4}', text):
-        return _parse_rhb_csv_block(text, page_num)
-    else:
-        # Fallback to your existing line-by-line logic (Function A/C from previous code)
-        # For this example, I will return an empty list or you can paste your old logic here.
-        # print(f"Page {page_num}: Standard format detected (not CSV).")
-        return [] 
-
-def _parse_rhb_csv_block(text, page_num):
-    """
-    Internal helper to parse the fragmented CSV blocks found in newer/export-style RHB PDFs.
+    Parses RHB Bank transactions from standard tabular format.
+    Handles both 2-digit and 4-digit year formats.
     """
     transactions = []
     
-    # 1. CLEANUP: 
-    # Remove newlines to merge broken fields (e.g. Branch on one line, Desc on next)
-    clean_text = text.replace("\n", " ").replace("\r", "")
+    # Split text into lines
+    lines = text.split('\n')
     
-    # 2. NORMALIZE SEPARATORS:
-    # The PDF often contains ",," for empty columns (e.g., empty debit or credit).
-    # We replace ",," with ",""," to ensure the split works consistently.
-    # We do this twice to catch consecutive empty columns if any.
-    clean_text = clean_text.replace(",,", ',"",').replace(",,", ',"",')
+    # Pattern to match transaction lines
+    # Format: DD MMM Description ... Serial_No Debit Credit Balance
+    # Example: 07 Mar CDT CASH DEPOSIT 0000004470 1,000.00 1,000.00
     
-    # 3. SPLIT INTO ROWS:
-    # Split by looking for the Date pattern "DD-MM-YYYY" at the start of a CSV field.
-    # We use a lookahead (?=...) to keep the date in the string.
-    # Pattern explanation: (?=" matches start of quote, then date, then end quote
-    row_pattern = r'(?="\d{2}-\d{2}-\d{4}",")'
-    rows = re.split(row_pattern, clean_text)
-    
-    for row in rows:
-        row = row.strip()
-        if not row:
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
             continue
-            
-        # 4. PARSE COLUMNS
-        # Now we can safely split by '","' because we normalized the empty fields.
-        parts = row.split('","')
         
-        # We need at least basic fields. 
-        # Usually: [Date, Branch, Desc, ..., RefNum, Dr, Cr, Balance]
-        if len(parts) < 5:
+        # Match lines starting with date pattern: DD Mon
+        date_match = re.match(r'^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', line, re.IGNORECASE)
+        
+        if not date_match:
             continue
-            
+        
+        day = date_match.group(1).zfill(2)
+        month = date_match.group(2).capitalize()
+        
+        # Convert month name to number
+        month_map = {
+            'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
+            'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
+            'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
+        }
+        month_num = month_map.get(month, '01')
+        
+        # Extract the rest of the line after date
+        rest_of_line = line[date_match.end():].strip()
+        
+        # Split by whitespace to get fields
+        parts = rest_of_line.split()
+        
+        if len(parts) < 2:
+            continue
+        
+        # Find numeric fields (serial number, debit, credit, balance)
+        # They typically appear at the end of the line
+        numeric_fields = []
+        description_parts = []
+        
+        for part in parts:
+            # Check if this looks like a number (with or without commas)
+            clean_part = part.replace(',', '')
+            if re.match(r'^\d+\.?\d*$', clean_part) or part.startswith('0000'):
+                numeric_fields.append(part)
+            else:
+                description_parts.append(part)
+        
+        # We need at least: serial_no, and balance (minimum)
+        # Full format: serial_no, debit, credit, balance
+        if len(numeric_fields) < 1:
+            continue
+        
+        # Parse numeric fields
         try:
-            # --- EXTRACT ---
-            # Date is always first
-            raw_date = parts[0].replace('"', '').strip()
+            # Last field is always balance
+            balance_str = numeric_fields[-1].replace(',', '')
+            balance = float(balance_str) if balance_str else 0.0
             
-            # [cite_start]Balance is always last [cite: 10]
-            raw_bal = parts[-1].replace('"', '').replace(',', '').strip()
+            # Handle negative balances (trailing minus sign)
+            if len(numeric_fields) > 0 and numeric_fields[-1].endswith('-'):
+                balance = -float(numeric_fields[-1][:-1].replace(',', ''))
             
-            # Credit is second to last
-            raw_cr = parts[-2].replace('"', '').replace(',', '').strip()
+            # If we have 4 numeric fields: serial, debit, credit, balance
+            # If we have 3 numeric fields: serial, amount, balance (need to determine if debit or credit)
+            # If we have 2 numeric fields: amount, balance
             
-            # Debit is third to last
-            raw_dr = parts[-3].replace('"', '').replace(',', '').strip()
+            debit = 0.0
+            credit = 0.0
             
-            # RefNum is fourth to last?
-            # Description is everything between Branch (index 1) and RefNum
-            # Let's dynamically join the middle parts as description
-            branch = parts[1]
-            desc_parts = parts[2:-3] # Everything between Branch and Debit/Cr/Bal
-            full_desc = f"{branch} " + " ".join(desc_parts).replace('"', '')
-            
-            # --- CLEAN NUMBERS ---
-            # [cite_start]Handle RHB's trailing minus sign for negative balances (e.g. "770,138.57-") [cite: 10]
-            if raw_bal.endswith("-"):
-                balance = -float(raw_bal[:-1])
-            else:
-                balance = float(raw_bal) if raw_bal else 0.0
+            if len(numeric_fields) >= 4:
+                # Format: serial_no debit credit balance
+                debit_str = numeric_fields[-3].replace(',', '')
+                credit_str = numeric_fields[-2].replace(',', '')
                 
-            debit = float(raw_dr) if raw_dr and raw_dr != "-" else 0.0
-            credit = float(raw_cr) if raw_cr and raw_cr != "-" else 0.0
+                debit = float(debit_str) if debit_str and debit_str != '-' else 0.0
+                credit = float(credit_str) if credit_str and credit_str != '-' else 0.0
+                
+            elif len(numeric_fields) == 3:
+                # Format: serial_no amount balance
+                # Determine if debit or credit based on description or balance change
+                amount_str = numeric_fields[-2].replace(',', '')
+                amount = float(amount_str) if amount_str else 0.0
+                
+                # Common credit keywords
+                credit_keywords = ['CR', 'DEPOSIT', 'INWARD', 'FUND TRF-CR', 'QR P2P CR']
+                debit_keywords = ['DR', 'WITHDRAWAL', 'FEES', 'FUND TRF-DR', 'QR P2P DR']
+                
+                desc_upper = ' '.join(description_parts).upper()
+                
+                if any(kw in desc_upper for kw in credit_keywords):
+                    credit = amount
+                elif any(kw in desc_upper for kw in debit_keywords):
+                    debit = amount
+                else:
+                    # Default: if description contains "DR", it's debit, else credit
+                    if ' DR' in desc_upper or desc_upper.endswith('DR'):
+                        debit = amount
+                    else:
+                        credit = amount
             
-            # --- REFORMAT DATE ---
-            # DD-MM-YYYY -> YYYY-MM-DD
-            if "-" in raw_date:
-                dd, mm, yyyy = raw_date.split("-")
-                iso_date = f"{yyyy}-{mm}-{dd}"
-            else:
-                iso_date = raw_date # Fallback
-
-            # --- APPEND ---
+            elif len(numeric_fields) == 2:
+                # Format: amount balance (no serial number)
+                amount_str = numeric_fields[0].replace(',', '')
+                amount = float(amount_str) if amount_str else 0.0
+                
+                desc_upper = ' '.join(description_parts).upper()
+                credit_keywords = ['CR', 'DEPOSIT', 'INWARD', 'FUND TRF-CR', 'QR P2P CR']
+                
+                if any(kw in desc_upper for kw in credit_keywords):
+                    credit = amount
+                else:
+                    debit = amount
+            
+            # Build description
+            description = ' '.join(description_parts)
+            
+            # Skip summary lines
+            if 'TOTAL COUNT' in description.upper() or 'C/F BALANCE' in description.upper() or 'B/F BALANCE' in description.upper():
+                continue
+            
+            # Format date as YYYY-MM-DD
+            iso_date = f"{year}-{month_num}-{day}"
+            
             transactions.append({
                 "date": iso_date,
-                "description": " ".join(full_desc.split()), # Remove extra whitespace
+                "description": description,
                 "debit": debit,
                 "credit": credit,
                 "balance": balance,
                 "page": page_num
             })
             
-        except Exception as e:
-            # Skip noise/header rows that don't match the structure
+        except (ValueError, IndexError) as e:
+            # Skip lines that can't be parsed
             continue
-            
+    
     return transactions
