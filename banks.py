@@ -47,11 +47,8 @@ def parse_page_by_bank(
 
 
     if bank_hint == "pbb":
-        # Convert uploaded file to PyMuPDF doc
-        pdf_bytes = pdf_obj.stream  # pdfplumber has .stream
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            return parse_transactions_pbb(doc), "Public Bank (PBB)"
-
+        doc = load_pymupdf_from_pdfplumber(pdf_obj)
+        return parse_transactions_pbb(doc), "Public Bank (PBB)"
 
     if bank_hint == "rhb":
         return parse_transactions_rhb(text, page_num), "RHB Bank"
@@ -73,12 +70,9 @@ def parse_page_by_bank(
     if detected == "maybank":
         return parse_transactions_maybank(text, page_num, default_year), "Maybank"
 
-    if detected == "pbb":
-        pdf_bytes = pdf_obj.stream
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    
+    if bank_hint == "pbb":
+        doc = load_pymupdf_from_pdfplumber(pdf_obj)
         return parse_transactions_pbb(doc), "Public Bank (PBB)"
-
 
     if detected == "rhb":
         return parse_transactions_rhb(text, page_num), "RHB Bank"
