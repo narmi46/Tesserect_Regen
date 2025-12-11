@@ -10,14 +10,10 @@ import fitz  # PyMuPDF
 # -----------------------------
 # LOAD PyMuPDF FROM pdfplumber
 # -----------------------------
-def convert_pdfplumber_to_pymupdf(pdf_obj):
-    """
-    pdf_obj = pdfplumber PDF
-    Returns PyMuPDF document
-    """
-    raw = pdf_obj.open(original=True).read()
+def convert_to_pymupdf(uploaded_file):
+    raw = uploaded_file.read()
+    uploaded_file.seek(0)   # reset cursor so pdfplumber can still re-read
     return fitz.open(stream=raw, filetype="pdf")
-
 
 # -----------------------------
 # AUTO-DETECT BANK
