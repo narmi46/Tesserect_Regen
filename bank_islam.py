@@ -1,76 +1,140 @@
-import fitz
+# bank_islam.py
+
+import fitz  # PyMuPDF
 import re
+import pandas as pd
 
-DATE_RE = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b")
-AMOUNT_RE = re.compile(r"\d[\d,]*\.\d{2}")
+# ---------------------------
+# REGEX
+# ---------------------------
 
+# A Bank Islam row always begins with dd/mm/yyyy
+BANK_ISLAM_ROW_START = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}")
+
+# General row pattern extracted from your working RHB logic:
+BANK_ISLAM_PATTERN = re.compile(
+    r"^(\d{1,2}/\d{1,2}/\d{4})\s+"         # date
+    r"(\d{2}:\d{2}:\d{2})?\s*"             # optional time
+    r"(.+?)\s+"                            # description
+    r"([0-9,]+\.\d{2})\s+"                 # amount #1
+    r"([0-9,]+\.\d{2})\s+"                 # amount #2
+    r"([0-9,]+\.\d{2})$"                   # balance
+)
+
+
+# ---------------------------
+# GROUP WORDS INTO ROWS
+# ---------------------------
+def group_words_into_rows(words, y_tolerance=3):
+    rows = {}
+    for w in words:
+        x0, y0, x1, y1, text, *_ = w
+        y_key = round(y1, 1)
+
+        assigned = False
+        for existing_y in list(rows.keys()):
+            if abs(existing_y - y_key) <= y_tolerance:
+                rows[existing_y].append(w)
+                assigned = True
+                break
+
+        if not assigned:
+            rows[y_key] = [w]
+
+    return rows
+
+
+# ---------------------------
+# SORT WORDS LEFT → RIGHT
+# ---------------------------
+def row_to_text(row_words):
+    row_words = sorted(row_words, key=lambda w: w[0])
+    return " ".join([w[4] for w in row_words])
+
+
+# ---------------------------
+# PARSE SINGLE BANK ISLAM ROW
+# ---------------------------
+def parse_bank_islam_row(text, source_file, page):
+    m = BANK_ISLAM_PATTERN.match(text)
+    if not m:
+        return None
+
+    date_raw, time_raw, desc, amt1, amt2, balance_raw = m.groups()
+
+    # Clean numbers
+    a1 = float(amt1.replace(",", ""))
+    a2 = float(amt2.replace(",", ""))
+    balance = float(balance_raw.replace(",", ""))
+
+    # --------------------------
+    # Determine whether a1=debit or credit
+    # --------------------------
+    debit = credit = 0.0
+
+    # Typical Bank Islam logic:
+    if a1 > 0 and a2 == 0:
+        debit = a1
+    elif a2 > 0 and a1 == 0:
+        credit = a2
+    else:
+        # fallback if both filled:
+        text_u = desc.upper()
+        if "CHARGE" in text_u or "DR" in text_u:
+            debit = a1
+        else:
+            credit = a1
+
+    return {
+        "date": date_raw,
+        "description": desc.strip(),
+        "debit": debit,
+        "credit": credit,
+        "balance": balance,
+        "source_file": source_file,
+        "page": page
+    }
+
+
+# ---------------------------
+# MAIN PARSER FUNCTION
+# Called from banks.py
+# pdf_data = RAW PDF BYTES from Streamlit
+# ---------------------------
 def parse_bank_islam(pdf_data):
     """
-    pdf_data must be RAW PDF bytes.
+    Receives RAW PDF BYTES (from Streamlit f.getvalue()).
     """
-
     if isinstance(pdf_data, (bytes, bytearray)):
         doc = fitz.open(stream=pdf_data, filetype="pdf")
     elif isinstance(pdf_data, str):
         doc = fitz.open(pdf_data)
     else:
         raise TypeError(
-            f"Bank Islam parser expected PDF bytes or filepath, got {type(pdf_data)}"
+            f"Bank Islam parser expected bytes or file path, got {type(pdf_data)}"
         )
 
     transactions = []
-    current = None
 
-    for page in doc:
-        blocks = page.get_text("blocks")
-        blocks = sorted(blocks, key=lambda b: (b[1], b[0]))  # Sort by y,x
+    for page_index, page in enumerate(doc, start=1):
+        words = page.get_text("words")
 
-        for blk in blocks:
-            text = blk[4].strip()
+        if not words:
+            continue
 
-            dmatch = DATE_RE.search(text)
+        rows = group_words_into_rows(words)
+        sorted_rows = [rows[y] for y in sorted(rows.keys())]
 
-            if dmatch:
-                # Save previous
-                if current:
-                    transactions.append(current)
+        for row in sorted_rows:
+            text = row_to_text(row).strip()
 
-                date_raw = dmatch.group(1)
-                dd, mm, yyyy = date_raw.split("/")
-                if len(yyyy) == 2:
-                    yyyy = "20" + yyyy
-                date_fmt = f"{yyyy}-{mm}-{dd}"
+            # Must start with dd/mm/yyyy
+            if not BANK_ISLAM_ROW_START.match(text):
+                continue
 
-                # Extract amounts
-                amts = [float(a.replace(",", "")) for a in AMOUNT_RE.findall(text)]
-                debit = credit = balance = 0.0
+            parsed = parse_bank_islam_row(text, source_file="PDF", page=page_index)
 
-                if len(amts) >= 3:
-                    debit, credit, balance = amts[-3:]
-                elif len(amts) == 2:
-                    credit, balance = amts
-                elif len(amts) == 1:
-                    balance = amts[0]
-
-                desc = text.replace(date_raw, "")
-                for amt in AMOUNT_RE.findall(text):
-                    desc = desc.replace(amt, "")
-                desc = " ".join(desc.split())
-
-                current = {
-                    "date": date_fmt,
-                    "description": desc,
-                    "debit": debit,
-                    "credit": credit,
-                    "balance": balance,
-                }
-
-            else:
-                # Continue multi-line description
-                if current:
-                    current["description"] += " " + text
-
-    if current:
-        transactions.append(current)
+            if parsed:
+                transactions.append(parsed)
 
     return transactions
