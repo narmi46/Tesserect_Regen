@@ -65,7 +65,7 @@ def parse_page_by_bank(text, page_obj, page_num, pdf_obj, bank_hint, default_yea
     detected = detect_bank_by_text(text)
 
     if detected == "pbb":
-        doc = convert_pdfplumber_to_pymupdf(pdf_obj)
+        doc = convert_to_pymupdf(pdf_obj)
         return parse_transactions_pbb(doc, year=default_year), "Public Bank (PBB)"
 
     if detected == "maybank":
