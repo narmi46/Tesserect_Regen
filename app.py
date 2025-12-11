@@ -128,7 +128,7 @@ if uploaded_files and st.session_state.status == "running":
                     text=text,
                     page_obj=page,
                     page_num=page_num,
-                    pdf_obj=f
+                    pdf_obj=f,
                     bank_hint=bank_hint,
                     default_year=default_year,
                     source_file=f.name
