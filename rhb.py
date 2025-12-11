@@ -3,8 +3,14 @@ from datetime import datetime
 
 def parse_transactions_rhb(text, page_num, year=2024):
     """
-    Parses RHB Bank transactions from standard tabular format.
-    Handles both 2-digit and 4-digit year formats.
+    Parses RHB Bank transactions from the actual PDF format.
+    
+    Format example from PDF:
+    07 Mar CDT CASH DEPOSIT 0000004470 1,000.00 1,000.00
+    09 Mar DUITNOW QR P2P CR 0000007440 540.00 1,528.00
+    RHBQR000000
+    ASPIYAH BINTI DARTO SUMIJO
+    QR Payment
     """
     transactions = []
     
@@ -22,8 +28,10 @@ def parse_transactions_rhb(text, page_num, year=2024):
     while i < len(lines):
         line = lines[i].strip()
         
-        # Match lines starting with date pattern: DD Mon
-        date_match = re.match(r'^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(.+)', line, re.IGNORECASE)
+        # Match the exact RHB format: DD Mon DESCRIPTION SERIAL AMOUNT BALANCE
+        # Pattern: starts with 1-2 digits, space, 3-letter month
+        date_pattern = r'^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(.+)'
+        date_match = re.match(date_pattern, line, re.IGNORECASE)
         
         if not date_match:
             i += 1
@@ -34,127 +42,126 @@ def parse_transactions_rhb(text, page_num, year=2024):
         month_num = month_map.get(month, '01')
         rest_of_line = date_match.group(3).strip()
         
-        # Skip summary/header lines
-        if any(skip in rest_of_line.upper() for skip in ['B/F BALANCE', 'C/F BALANCE', 'TOTAL COUNT']):
+        # Skip summary/control lines
+        skip_keywords = ['B/F BALANCE', 'C/F BALANCE', 'TOTAL COUNT', 'Total Count']
+        if any(keyword in rest_of_line for keyword in skip_keywords):
             i += 1
             continue
         
-        # Collect description lines (description can span multiple lines)
-        description_lines = [rest_of_line]
+        # Parse the rest of the line
+        # Format: DESCRIPTION SERIAL_NUMBER DEBIT CREDIT BALANCE
+        # Numbers at the end are: serial (10 digits), debit, credit, balance
+        # Example: "CDT CASH DEPOSIT 0000004470 1,000.00 1,000.00"
         
-        # Look ahead for continuation lines (lines that don't start with a date)
-        j = i + 1
-        while j < len(lines):
-            next_line = lines[j].strip()
-            # If next line starts with a date or is empty, stop
-            if not next_line or re.match(r'^\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', next_line, re.IGNORECASE):
-                break
-            # If next line has numeric pattern at end (likely the amounts row), stop
-            if re.search(r'\d+,?\d*\.?\d*\s*$', next_line):
-                # This is likely the amounts line
-                description_lines.append(next_line)
-                j += 1
-                break
-            description_lines.append(next_line)
-            j += 1
+        # Extract all numbers (including serial numbers and amounts)
+        # Pattern matches: 10-digit numbers (serial) and decimal amounts
+        parts = rest_of_line.split()
         
-        # Join all description lines
-        full_text = ' '.join(description_lines)
+        # Find numeric values - looking for pattern like: 0000004470 1,000.00 1,000.00
+        numeric_parts = []
+        desc_parts = []
         
-        # Extract numeric fields from the end
-        # Pattern: Look for numbers with optional commas and decimals
-        # Expected format: [Serial] [Debit] [Credit] Balance
-        # Numbers can be: 1,000.00 or 1000.00 or 1,000 or 1000
+        for part in parts:
+            clean_part = part.replace(',', '')
+            # Check if it's a number (serial number or amount)
+            if re.match(r'^\d+(\.\d{2})?$', clean_part):
+                numeric_parts.append(clean_part)
+            else:
+                desc_parts.append(part)
         
-        # Find all numbers in the line (including serial numbers like 0000004470)
-        number_pattern = r'(\d+(?:,\d{3})*(?:\.\d{2})?)'
-        numbers = re.findall(number_pattern, full_text)
-        
-        if len(numbers) < 1:
-            i = j
+        if len(numeric_parts) < 1:
+            i += 1
             continue
         
-        # Clean numbers (remove commas)
-        numbers = [n.replace(',', '') for n in numbers]
+        # Last number is balance
+        balance = float(numeric_parts[-1])
         
-        # The last number is always the balance
-        balance = float(numbers[-1])
-        
-        # Initialize debit and credit
+        # Determine debit/credit based on number of numeric fields
         debit = 0.0
         credit = 0.0
+        description = ' '.join(desc_parts)
         
-        # Determine description (everything except the numeric fields at the end)
-        # Remove the numeric fields from the text to get clean description
-        desc_text = full_text
-        for num in numbers[-3:]:  # Remove last 3 numbers from description
-            # Replace the number with empty string (but only once from the end)
-            desc_text = re.sub(r'\b' + re.escape(num.replace('.', r'\.')) + r'\b\s*$', '', desc_text, count=1)
+        # RHB format analysis:
+        # - If 3+ numbers: serial, amount, balance (OR serial, debit, credit, balance)
+        # - If 2 numbers: amount, balance
         
-        description = ' '.join(desc_text.split()).strip()
-        
-        # Determine if transaction is debit or credit based on keywords
-        desc_upper = description.upper()
-        
-        # Credit keywords
-        credit_keywords = [
-            'CR', 'CREDIT', 'DEPOSIT', 'INWARD', 'FUND TRF-CR', 
-            'QR P2P CR', 'CASH DEPOSIT', 'CDT'
-        ]
-        
-        # Debit keywords  
-        debit_keywords = [
-            'DR', 'DEBIT', 'WITHDRAWAL', 'FEES', 'FUND TRF-DR',
-            'QR P2P DR', 'INSTANT TRF DR', 'MBK INSTANT TRF DR'
-        ]
-        
-        # Check if it's clearly a credit or debit
-        is_credit = any(kw in desc_upper for kw in credit_keywords)
-        is_debit = any(kw in desc_upper for kw in debit_keywords)
-        
-        # Assign amount based on format
-        if len(numbers) >= 4:
-            # Format: serial debit credit balance
-            try:
-                debit = float(numbers[-3])
-                credit = float(numbers[-2])
-            except:
-                pass
-        elif len(numbers) == 3:
-            # Format: serial amount balance
-            amount = float(numbers[-2])
-            if is_credit:
-                credit = amount
-            elif is_debit:
-                debit = amount
+        if len(numeric_parts) >= 3:
+            # Could be: serial, debit, credit, balance OR serial, amount, balance
+            if len(numeric_parts) >= 4:
+                # serial, debit, credit, balance
+                debit = float(numeric_parts[-3])
+                credit = float(numeric_parts[-2])
             else:
-                # Default: if no clear indicator, check description
-                if ' DR' in desc_upper or desc_upper.endswith('DR'):
+                # serial, amount, balance - need to determine debit vs credit
+                amount = float(numeric_parts[-2])
+                
+                # Check description for CR or DR keywords
+                desc_upper = description.upper()
+                if 'CR' in desc_upper or 'DEPOSIT' in desc_upper or 'INWARD' in desc_upper:
+                    credit = amount
+                elif 'DR' in desc_upper or 'WITHDRAWAL' in desc_upper or 'FEES' in desc_upper:
                     debit = amount
                 else:
-                    credit = amount
-        elif len(numbers) == 2:
-            # Format: amount balance
-            amount = float(numbers[-2])
-            if is_credit:
+                    # Default logic: if description contains TRF DR or ends with DR = debit
+                    if 'TRF DR' in desc_upper or desc_upper.endswith(' DR'):
+                        debit = amount
+                    else:
+                        credit = amount
+        
+        elif len(numeric_parts) == 2:
+            # amount, balance
+            amount = float(numeric_parts[-2])
+            desc_upper = description.upper()
+            
+            if 'CR' in desc_upper or 'DEPOSIT' in desc_upper or 'INWARD' in desc_upper:
                 credit = amount
             else:
                 debit = amount
+        
+        # Collect additional description lines (lines after the main line that don't start with a date)
+        j = i + 1
+        additional_desc = []
+        while j < len(lines) and j < i + 5:  # Look ahead max 5 lines
+            next_line = lines[j].strip()
+            # Stop if we hit another transaction (starts with date)
+            if re.match(r'^\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', next_line, re.IGNORECASE):
+                break
+            # Stop if empty line
+            if not next_line:
+                j += 1
+                continue
+            # Stop if it's a header or table separator
+            if any(kw in next_line for kw in ['Date', 'Tarikh', 'Description', 'Diskripsi', 'Cheque', 'Debit', 'Credit', 'Balance', '---']):
+                break
+            # Add to description if it looks like descriptive text (not numbers)
+            if not re.match(r'^[\d,.\s]+$', next_line):
+                additional_desc.append(next_line)
+            j += 1
+        
+        # Combine main description with additional lines
+        if additional_desc:
+            full_description = f"{description} {' '.join(additional_desc)}"
+        else:
+            full_description = description
+        
+        # Clean up description
+        full_description = ' '.join(full_description.split())
         
         # Format date as YYYY-MM-DD
         iso_date = f"{year}-{month_num}-{day}"
         
-        # Only add if we have a valid description
-        if description and description != '':
+        # Only add valid transactions
+        if full_description and full_description != '':
             transactions.append({
                 "date": iso_date,
-                "description": description,
+                "description": full_description,
                 "debit": debit,
                 "credit": credit,
                 "balance": balance,
                 "page": page_num
             })
         
+        # Move to next line after the additional description lines
         i = j if j > i else i + 1
     
     return transactions
