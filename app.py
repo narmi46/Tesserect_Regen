@@ -176,11 +176,8 @@ if uploaded_files and bank_hint is None:
                     detected_bank = "Maybank"
                 elif "PUBLIC BANK" in text.upper() or "PBB" in text.upper():
                     detected_bank = "Public Bank (PBB)"
-                elif bank_hint == "rhb":
+                elif "RHB" in text.upper():
                     detected_bank = "RHB Bank"
-                        # Use statement_year if available, otherwise default_year
-                        year_to_use = statement_month[0] if statement_month else int(default_year)
-                        tx = parse_transactions_rhb(text, page_num, year_to_use)
                 
                 # Extract statement month
                 statement_month = extract_statement_month(pdf, uploaded_file.name)
@@ -218,8 +215,12 @@ st.write(f"### ⚙️ Status: **{st.session_state.status.upper()}**")
 # Auto-Detect Parsing Function
 # ---------------------------------------------------
 def auto_detect_and_parse(text, page_obj, page_num, default_year="2025", **source_file_kwargs):
-
+    """Auto-detect bank and parse transactions"""
+    
     source_file = source_file_kwargs.get("source_file", "AutoDetect")
+    
+    # Convert default_year to int
+    year_int = int(default_year) if isinstance(default_year, str) else default_year
 
     # CIMB
     if "CIMB" in text.upper():
@@ -237,19 +238,10 @@ def auto_detect_and_parse(text, page_obj, page_num, default_year="2025", **sourc
     if tx:
         return tx, "Public Bank (PBB)"
 
-    # RHB
-    year_to_use = int(default_year)
-# Try to extract year from source_file if provided
-        if 'source_file' in source_file_kwargs:
-            filename = source_file_kwargs['source_file']
-            year_match = re.search(r'(20\d{2})', filename)
-            
-            if year_match:
-                year_to_use = int(year_match.group(1))
-
-tx = parse_transactions_rhb(text, page_num, year_to_use)
-if tx:
-    return tx, "RHB Bank"
+    # RHB - FIXED: Pass year parameter
+    tx = parse_transactions_rhb(text, page_num, year_int)
+    if tx:
+        return tx, "RHB Bank"
 
     return [], "Unknown"
 
@@ -289,6 +281,9 @@ if uploaded_files and st.session_state.status == "running":
 
                     bank_display_box.info(f"🔍 Detecting bank for Page {page_num}...")
 
+                    # Determine year to use
+                    year_to_use = statement_month[0] if statement_month else int(default_year)
+
                     # DIRECT PARSING if bank selected
                     if bank_hint == "maybank":
                         detected_bank = "Maybank"
@@ -300,7 +295,7 @@ if uploaded_files and st.session_state.status == "running":
 
                     elif bank_hint == "rhb":
                         detected_bank = "RHB Bank"
-                        tx = parse_transactions_rhb(text, page_num)
+                        tx = parse_transactions_rhb(text, page_num, year_to_use)
 
                     elif bank_hint == "cimb":
                         detected_bank = "CIMB Bank"
@@ -312,7 +307,7 @@ if uploaded_files and st.session_state.status == "running":
                             text=text,
                             page_obj=page,
                             page_num=page_num,
-                            default_year=default_year,
+                            default_year=str(year_to_use),
                             source_file=uploaded_file.name
                         )
 
