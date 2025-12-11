@@ -5,3 +5,4 @@ pillow
 regex
 tabulate
 pymupdf
+xlsxwriter
