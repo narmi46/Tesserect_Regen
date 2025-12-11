@@ -1,3 +1,5 @@
+# banks.py
+
 from maybank import parse_transactions_maybank
 from public_bank import parse_transactions_pbb
 from rhb import parse_transactions_rhb
@@ -6,6 +8,7 @@ from bank_islam import parse_bank_islam
 
 
 def detect_bank_by_text(text: str):
+    """Auto-detect bank by scanning PDF text."""
     t = text.upper()
 
     if "CIMB" in t:
@@ -31,7 +34,14 @@ def parse_page_by_bank(
     default_year,
     source_file
 ):
-    # Manual Bank Selection
+    """
+    Returns (transaction_list, bank_name)
+    pdf_obj = full pdfplumber object (needed for Bank Islam)
+    """
+
+    # ------------------
+    # MANUAL SELECTION
+    # ------------------
     if bank_hint == "maybank":
         return parse_transactions_maybank(text, page_num, default_year), "Maybank"
 
@@ -47,7 +57,9 @@ def parse_page_by_bank(
     if bank_hint == "bank_islam":
         return parse_bank_islam(pdf_obj), "Bank Islam"
 
-    # Auto-detect Mode
+    # ------------------
+    # AUTO-DETECT MODE
+    # ------------------
     detected = detect_bank_by_text(text)
 
     if detected == "cimb":
