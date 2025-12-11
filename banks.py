@@ -1,5 +1,5 @@
 # banks.py
-
+import fitz  # ensure at top of file
 from maybank import parse_transactions_maybank
 from public_bank import parse_transactions_pbb
 from rhb import parse_transactions_rhb
@@ -45,7 +45,6 @@ def parse_page_by_bank(
     if bank_hint == "maybank":
         return parse_transactions_maybank(text, page_num, default_year), "Maybank"
 
-    import fitz  # ensure at top of file
 
     if bank_hint == "pbb":
         # Convert uploaded file to PyMuPDF doc
