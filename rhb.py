@@ -54,48 +54,11 @@ def classify_first_tx(desc, amount):
         "DEPOSIT" in s or
         "CDT" in s or
         "INWARD" in s or
+        "CREDIT" in s or
         s.endswith("CR")
     ):
         return 0.0, amount
     return amount, 0.0
-
-
-# ============================================================
-# REGEX PATTERNS FOR ALL RHB FORMATS
-# ============================================================
-
-# -------- FORMAT A (Old RHB PDF: 3 March 2024) --------
-PATTERN_TX_A = re.compile(
-    r"^(\d{1,2})([A-Za-z]{3})\s+"        # 07 Mar
-    r"(.+?)\s+"                          # description
-    r"(\d{4,20})\s+"                     # serial (4–20 digits)
-    r"([0-9,]+\.\d{2})\s+"               # amount
-    r"([0-9,]+\.\d{2})"                  # balance
-)
-
-PATTERN_BF_CF = re.compile(
-    r"^\d{1,2}[A-Za-z]{3}\s+(B/F BALANCE|C/F BALANCE)\s+([0-9,]+\.\d{2})$"
-)
-
-# -------- FORMAT B (Internet banking after export) --------
-# UPDATED: More robust pattern with proper description capture
-PATTERN_TX_B = re.compile(
-    r'(\d{2}-\d{2}-\d{4})\s+'           # Date: 05-02-2025
-    r'(\d{3})\s+'                        # Branch: 770
-    r'(.+?)\s+'                          # Description (non-greedy)
-    r'(?:([0-9,]+\.\d{2})|-)\s+'        # Amount DR or -
-    r'(?:([0-9,]+\.\d{2})|-)\s+'        # Amount CR or -
-    r'([0-9,]+\.\d{2})([+-])'           # Balance with +/- sign
-)
-
-# -------- FORMAT C (New Islamic PDF: Jan 2025) --------
-PATTERN_TX_C = re.compile(
-    r"^(\d{1,2})\s+([A-Za-z]{3})\s+"     # 06 Jan
-    r"(.+?)\s+"                          # description (multi-word)
-    r"(\d{4,20})\s+"                     # serial
-    r"([0-9,]+\.\d{2})\s+"               # amount
-    r"([0-9,]+\.\d{2})"                  # balance
-)
 
 
 # ============================================================
@@ -120,6 +83,13 @@ def should_skip_line(line):
         r'Reflex Cash Management',
         r'Account\s*Name',
         r'Account\s*Number',
+        r'Reference\s*1\s*/\s*Reference\s*2',
+        r'Sender\'s\s*/\s*Beneficiary',
+        r'RefNum\s+Amount',
+        r'^\s*\(RM\)\s*$',  # Skip "(RM)" line
+        r'DEPOSITACCOUNTSUMMARY',  # Skip summary header
+        r'OpeningBalance.*EndingBalance',  # Skip balance summary
+        r'NamaAkaun\s+NomborAkaun',  # Skip Malay headers
     ]
     
     for pattern in skip_patterns:
@@ -129,8 +99,50 @@ def should_skip_line(line):
     # Skip lines that are just account holder names (all caps with SDN BHD etc)
     if re.match(r'^[A-Z\s\.]+(?:SDN\.?\s*BHD\.?|SERVICES|ENTERPRISE)[\s\.]*$', line):
         return True
+    
+    # Skip opening/closing balance summary lines
+    # Example: "ORDINARYCURRENTACCOUNT 21406200114180 0.00"
+    if re.match(r'^[A-Z\s]+\d{10,20}\s+[0-9,]+\.\d{2}', line):
+        return True
         
     return False
+
+
+# ============================================================
+# REGEX PATTERNS FOR ALL RHB FORMATS
+# ============================================================
+
+# -------- FORMAT A (Old RHB PDF: 3 March 2024) --------
+PATTERN_TX_A = re.compile(
+    r"^(\d{1,2})([A-Za-z]{3})\s+"        # 07 Mar
+    r"(.+?)\s+"                          # description
+    r"(\d{4,20})\s+"                     # serial (4–20 digits)
+    r"([0-9,]+\.\d{2})\s+"               # amount
+    r"([0-9,]+\.\d{2})$"                 # balance (end of line)
+)
+
+PATTERN_BF_CF = re.compile(
+    r"^\d{1,2}[A-Za-z]{3}\s+(B/F BALANCE|C/F BALANCE)\s+([0-9,]+\.\d{2})$"
+)
+
+# -------- FORMAT B (Internet banking after export) --------
+PATTERN_TX_B = re.compile(
+    r'(\d{2}-\d{2}-\d{4})\s+'           # Date: 05-02-2025
+    r'(\d{3})\s+'                        # Branch: 770
+    r'(.+?)\s+'                          # Description (non-greedy)
+    r'(?:([0-9,]+\.\d{2})|-)\s+'        # Amount DR or -
+    r'(?:([0-9,]+\.\d{2})|-)\s+'        # Amount CR or -
+    r'([0-9,]+\.\d{2})([+-])'           # Balance with +/- sign
+)
+
+# -------- FORMAT C (New Islamic PDF: Jan 2025) --------
+PATTERN_TX_C = re.compile(
+    r"^(\d{1,2})\s+([A-Za-z]{3})\s+"     # 06 Jan
+    r"(.+?)\s+"                          # description (multi-word)
+    r"(\d{4,20})\s+"                     # serial
+    r"([0-9,]+\.\d{2})\s+"               # amount
+    r"([0-9,]+\.\d{2})$"                 # balance (end of line)
+)
 
 
 # ============================================================
@@ -175,7 +187,7 @@ def parse_line_rhb(line, page_num, year=2025):
     if PATTERN_BF_CF.match(line):
         return {"type": "bf_cf"}
 
-    # -------- FORMAT B: Online Banking (UPDATED) --------
+    # -------- FORMAT B: Online Banking --------
     mB = PATTERN_TX_B.search(line)
     if mB:
         date_raw, branch, desc, dr_raw, cr_raw, balance_raw, sign = mB.groups()
@@ -195,8 +207,8 @@ def parse_line_rhb(line, page_num, year=2025):
             "type": "tx",
             "date": date_fmt,
             "description": fix_description(desc),
-            "debit_raw": debit,      # NEW: Store raw DR/CR from statement
-            "credit_raw": credit,    # NEW: Store raw DR/CR from statement
+            "debit_raw": debit,      # Store raw DR/CR from statement
+            "credit_raw": credit,    # Store raw DR/CR from statement
             "amount_raw": debit + credit,  # Keep for compatibility
             "balance": bal,
             "page": page_num,
@@ -228,7 +240,7 @@ def parse_transactions_rhb(text, page_num, year=2025):
 
         curr_balance = parsed["balance"]
         
-        # NEW: Check if we have raw DR/CR from Format B
+        # Check if we have raw DR/CR from Format B
         if "debit_raw" in parsed and "credit_raw" in parsed:
             # Use the DR/CR directly from the statement
             debit = parsed["debit_raw"]
